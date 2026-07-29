@@ -530,10 +530,7 @@ with col_clear:
 col_f1, col_f2, col_f3, col_f4, col_f5 = st.columns(5)
 
 def filtro_gerencial(label, opciones_totales, key, sort_func=None):
-    """Filtro multiselect con cascada estricta.
-    - sort_func: función opcional para ordenar las opciones (ej. sort_prioridades).
-    - Si el usuario no selecciona nada, devuelve todas las opciones disponibles (sin filtro).
-    """
+    """Filtro multiselect con cascada estricta."""
     st.markdown(f"<span style='font-size: 0.75rem; color: #777; font-weight: bold;'>🔍 {label.upper()}</span>", unsafe_allow_html=True)
 
     opciones_raw = list(set([str(op) for op in opciones_totales if pd.notna(op)]))
@@ -610,10 +607,10 @@ total_plan = om_filt['Tota general (plan)'].sum()
 total_real = om_filt['Costes tot.reales'].sum()
 desviacion_clp = total_real - total_plan
 
-col_k1.metric("AVISOS ACTIVOS", f"{len(av_filt):,}")
+col_k1.metric("COSTO PLANIFICADO", f"${total_plan:,.0f}".replace(',', '.'))
 col_k2.metric("COSTO REAL", f"${total_real:,.0f}".replace(',', '.'))
 col_k3.metric("DESVIACIÓN (CLP)", f"${desviacion_clp:,.0f}".replace(',', '.'))
-col_k4.metric("COSTO PLANIFICADO", f"${total_plan:,.0f}".replace(',', '.'))
+col_k4.metric("AVISOS ACTIVOS", f"{len(av_filt):,}")
 col_k5.metric("FECHA ACTUALIZACIÓN", datetime.today().strftime('%d-%m-%Y'))
 st.markdown("<br>", unsafe_allow_html=True)
 
@@ -622,13 +619,50 @@ st.markdown("<br>", unsafe_allow_html=True)
 # =====================================================================
 # PESTAÑAS DE CONTENIDO (TODO INCLUIDO)
 # =====================================================================
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab_om, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "✅ Resumen OMs",
     "📊 Resumen Avisos", 
     "📋 Detalle Avisos y OMs", 
     "📅 Línea de Tiempo", 
     "👥 Carga de Trabajo", 
     "🗃️ Explorador de Datos"
 ])
+
+# ---------------------------------------------------------------------
+# TAB OM: RESUMEN DE OMS
+# ---------------------------------------------------------------------
+with tab_om:
+    qlik_colors = ['#006580', '#A3334E', '#E5CDA8', '#7AB3A2', '#4C2C69']
+    
+    st.subheader("✅ Resumen de OMs por Programador")
+    if not om_filt.empty:
+        # 1. Crear Tabla Pivot
+        tabla_oms_pivot = pd.crosstab(index=om_filt['Programador'], columns=om_filt['Status de usuario'], margins=True, margins_name='Total general').reset_index()
+        st.dataframe(tabla_oms_pivot, use_container_width=True, hide_index=True)
+        
+        # 2. Botón Interruptor para Gráficos
+        if st.toggle("📊 Mostrar gráficos de OMs", key="toggle_graf_om"):
+            st.markdown("<div class='qlik-container'>", unsafe_allow_html=True)
+            col_g_om1, col_g_om2 = st.columns(2)
+            
+            with col_g_om1:
+                st.markdown("**OMs por Prioridad**")
+                df_prio_om = om_filt.groupby('Prioridad').size().reset_index(name='Cantidad')
+                fig_donut_om = px.pie(df_prio_om, values='Cantidad', names='Prioridad', hole=0.65, color_discrete_sequence=qlik_colors)
+                fig_donut_om.update_traces(textposition='inside', textinfo='value')
+                fig_donut_om.update_layout(margin=dict(t=10, b=10, l=10, r=10), showlegend=True, paper_bgcolor='rgba(0,0,0,0)')
+                st.plotly_chart(fig_donut_om, use_container_width=True)
+                
+            with col_g_om2:
+                st.markdown("**OMs por Status y Programador**")
+                df_om_bar = om_filt.groupby(['Programador', 'Status de usuario']).size().reset_index(name='Cantidad')
+                fig_bar_om = px.bar(df_om_bar, x='Programador', y='Cantidad', color='Status de usuario', color_discrete_sequence=qlik_colors)
+                fig_bar_om.update_layout(margin=dict(t=10, b=10, l=10, r=10), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                st.plotly_chart(fig_bar_om, use_container_width=True)
+                
+            st.markdown("</div>", unsafe_allow_html=True)
+    else: 
+        st.info("Sin datos para el resumen de OMs.")
 
 # ---------------------------------------------------------------------
 # TAB 1: RESUMEN EJECUTIVO
@@ -894,32 +928,35 @@ with tab4:
     # ----------------------------------------------------------------
     st.markdown("---")
     st.subheader("💰 Análisis de Eficiencia Presupuestaria")
-
+    
     if not om_filt.empty:
         df_eficiencia = om_filt.groupby('Programador').agg(
-            Planificado=('Tota general (plan)', 'sum'),
-            Real=('Costes tot.reales', 'sum'),
+            Planificado=('Tota general (plan)', 'sum'), 
+            Real=('Costes tot.reales', 'sum'), 
             Cant_OMs=('Orden', 'count')
         ).reset_index()
-
+        
         df_eficiencia['Desviacion_CLP'] = df_eficiencia['Real'] - df_eficiencia['Planificado']
-
+        
         fig_costos = px.bar(
-            df_eficiencia.melt(id_vars='Programador', value_vars=['Planificado', 'Real']),
-            x='Programador', y='value', color='variable', barmode='group',
+            df_eficiencia.melt(id_vars='Programador', value_vars=['Planificado', 'Real']), 
+            x='Programador', y='value', color='variable', barmode='group', 
             title="Comparativa Planificado vs Real por Programador",
             labels={'value': 'Monto (CLP)', 'variable': 'Tipo de Costo'},
             color_discrete_sequence=['#006580', '#A3334E']
         )
         fig_costos.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_costos, use_container_width=True)
-
+        
         st.markdown("### Detalle de Desviaciones (CLP)")
+        
+        # --- AQUÍ SE QUITA EL COLOR Y SE DA UN FORMATO LIMPIO ---
         df_eficiencia_disp = df_eficiencia.copy()
-        for col_e in ['Planificado', 'Real', 'Desviacion_CLP']:
-            df_eficiencia_disp[col_e] = df_eficiencia_disp[col_e].apply(lambda x: f"${x:,.0f}".replace(',', '.'))
+        for col in ['Planificado', 'Real', 'Desviacion_CLP']:
+            df_eficiencia_disp[col] = df_eficiencia_disp[col].apply(lambda x: f"${x:,.0f}".replace(',', '.'))
+            
         st.dataframe(df_eficiencia_disp, use_container_width=True, hide_index=True)
-    else:
+    else: 
         st.info("No hay datos de costos suficientes para el análisis.")
 
 # ---------------------------------------------------------------------
@@ -942,3 +979,4 @@ with tab5:
         st.dataframe(om_filt[cols_om_base + cols_om_extra], use_container_width=True, hide_index=True)
     else:
         st.info("No hay datos de OMs para mostrar.")
+
