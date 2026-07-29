@@ -11,6 +11,30 @@ from sqlalchemy import text # para ejecutar SQL directo
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# =====================================================================
+# CONSTANTES DE NEGOCIO — PRIORIDADES
+# =====================================================================
+# Mapeo de prioridad numérica (IW38/OMs) a texto unificado (igual que IW28/Avisos)
+MAPEO_PRIORIDAD_OM = {
+    1.0: '1 Muy Alta',
+    5.0: '1 Muy Alta',
+    6.0: '2 Alta',
+    7.0: '3 Media',
+    8.0: '4 Baja',
+}
+
+# Orden canónico para el filtro de prioridad
+ORDEN_PRIORIDADES = ['1 Muy Alta', '2 Alta', '3 Media', '4 Baja', 'Programable', 'Urgencia', 'Emergencia']
+
+def sort_prioridades(opciones: list) -> list:
+    """Ordena las prioridades según el orden definido por el cliente."""
+    def key_fn(p):
+        try:
+            return ORDEN_PRIORIDADES.index(p)
+        except ValueError:
+            return len(ORDEN_PRIORIDADES)  # desconocidas al final
+    return sorted(opciones, key=key_fn)
+
 
 @st.cache_data(ttl=60)
 def cargar_datos():
@@ -467,79 +491,110 @@ if not oms_df.empty:
         oms_df['ZONA'] = 'OTRAS'
 
     oms_df['Programador'] = oms_df.apply(asignar_programador, axis=1)
-    oms_df['Prioridad'] = oms_df.get('Prioridad', pd.Series(['Sin Prioridad']*len(oms_df))).fillna('Sin Prioridad').astype(str)
+
+    # Mapear prioridad numérica (IW38) a texto unificado (igual que Avisos IW28)
+    col_prio_om = next((c for c in oms_df.columns if c.lower() == 'prioridad'), None)
+    if col_prio_om:
+        oms_df['Prioridad'] = pd.to_numeric(oms_df[col_prio_om], errors='coerce').map(MAPEO_PRIORIDAD_OM).fillna('Sin Prioridad')
+    else:
+        oms_df['Prioridad'] = 'Sin Prioridad'
+
     oms_df['Denominación de la ubicación técnica'] = oms_df.get('Denominación de la ubicación técnica', pd.Series(['Desconocida']*len(oms_df))).fillna('Desconocida')
     oms_df['Tota general (plan)'] = pd.to_numeric(oms_df.get('Tota general (plan)', pd.Series([0]*len(oms_df))), errors='coerce').fillna(0)
     oms_df['Costes tot.reales'] = pd.to_numeric(oms_df.get('Costes tot.reales', pd.Series([0]*len(oms_df))), errors='coerce').fillna(0)
+
+    # Normalizar columna Equipo a entero para mejor legibilidad
+    if 'Equipo' in oms_df.columns:
+        oms_df['Equipo'] = pd.to_numeric(oms_df['Equipo'], errors='coerce').fillna(0).astype(int)
+
+    # Procesar fecha de creación de OMs para Carga de Trabajo
+    col_fecha_om = next((c for c in oms_df.columns if 'fecha' in c.lower() and 'cre' in c.lower()), None)
+    if col_fecha_om:
+        oms_df['Fecha Creacion OM'] = pd.to_datetime(oms_df[col_fecha_om], errors='coerce')
+    else:
+        oms_df['Fecha Creacion OM'] = pd.NaT
 else:
-    oms_df = pd.DataFrame(columns=['ZONA', 'Programador', 'Prioridad', 'Tota general (plan)', 'Costes tot.reales', 'Denominación de la ubicación técnica', 'Orden', 'Status de usuario'])
+    oms_df = pd.DataFrame(columns=['ZONA', 'Programador', 'Prioridad', 'Tota general (plan)', 'Costes tot.reales', 'Denominación de la ubicación técnica', 'Orden', 'Status de usuario', 'Equipo', 'Fecha Creacion OM'])
 
 # =====================================================================
 # FILTROS SUPERIORES (ESTILO QLIK - MULTISELECT CON SCROLL CSS)
 # =====================================================================
-col_clear, _ = st.columns([1.5, 10.5]) 
+col_clear, _ = st.columns([1.5, 10.5])
 with col_clear:
-    if st.button("🧹 Limpiar Filtro", use_container_width=True): 
+    if st.button("🧹 Limpiar Filtro", use_container_width=True):
+        # Resetear TODOS los filtros a lista vacía (vacío visual = ver todo)
         for key in ["fz", "fp", "fs", "fpr", "fl"]:
-            if key in st.session_state:
-                del st.session_state[key]
+            st.session_state[key] = []
         st.rerun()
 
 col_f1, col_f2, col_f3, col_f4, col_f5 = st.columns(5)
 
-def filtro_gerencial(label, opciones_totales, opciones_por_defecto, key):
+def filtro_gerencial(label, opciones_totales, key, sort_func=None):
+    """Filtro multiselect con cascada estricta.
+    - sort_func: función opcional para ordenar las opciones (ej. sort_prioridades).
+    - Si el usuario no selecciona nada, devuelve todas las opciones disponibles (sin filtro).
+    """
     st.markdown(f"<span style='font-size: 0.75rem; color: #777; font-weight: bold;'>🔍 {label.upper()}</span>", unsafe_allow_html=True)
-    opciones_limpias = sorted(list(set([str(op) for op in opciones_totales if pd.notna(op)])))
-    
-    # Manejo seguro del estado actual en memoria
-    estado_actual = st.session_state.get(key, opciones_por_defecto)
-    seleccion_valida = [op for op in estado_actual if op in opciones_limpias]
-    
+
+    opciones_raw = list(set([str(op) for op in opciones_totales if pd.notna(op)]))
+    if sort_func:
+        opciones_limpias = sort_func(opciones_raw)
+    else:
+        opciones_limpias = sorted(opciones_raw)
+
+    # Cascada: limpiar de session_state las opciones que ya no existen en este contexto filtrado
+    if key in st.session_state and isinstance(st.session_state[key], list):
+        st.session_state[key] = [op for op in st.session_state[key] if op in opciones_limpias]
+
     seleccionados = st.multiselect(
-        label, 
-        options=opciones_limpias, 
-        default=seleccion_valida, 
-        key=key, 
+        label,
+        options=opciones_limpias,
+        key=key,
         label_visibility="collapsed"
     )
-    
-    # Si la caja está vacía, se asume el 100% de la data disponible
+
+    # Si la caja está vacía, se asume el 100% de la data disponible (sin filtro)
     if not seleccionados:
         return opciones_limpias
     return seleccionados
 
 # --- LÓGICA DE CASCADA ESTRICTA ---
+# Cada filtro se alimenta del DataFrame ya reducido por los filtros previos.
 
 with col_f1:
-    zonas_todos = avisos_df['ZONA'].unique()
-    zonas_sel = filtro_gerencial("ZONA / CENTRO", zonas_todos, [], "fz")
-    
+    zonas_todos = list(set(avisos_df['ZONA'].unique()) | set(oms_df['ZONA'].unique()))
+    zonas_sel = filtro_gerencial("ZONA / CENTRO", zonas_todos, "fz")
+
 av_temp = avisos_df[avisos_df['ZONA'].isin(zonas_sel)]
 om_temp = oms_df[oms_df['ZONA'].isin(zonas_sel)]
 
 with col_f2:
-    progs_todos = av_temp['Programador'].unique()
-    progs_sel = filtro_gerencial("PROGRAMADOR", progs_todos, [], "fp")
+    # Programadores presentes en ambos datasets, dado el filtro de zona
+    progs_todos = list(set(av_temp['Programador'].unique()) | set(om_temp['Programador'].unique()))
+    progs_sel = filtro_gerencial("PROGRAMADOR", progs_todos, "fp")
 
 av_temp = av_temp[av_temp['Programador'].isin(progs_sel)]
 om_temp = om_temp[om_temp['Programador'].isin(progs_sel)]
 
 with col_f3:
-    status_todos = ['MEAB', 'METR', 'METR ORAS', 'MECE', 'MAEN', 'OTRO STATUS']
-    status_sel = filtro_gerencial("STATUS AVISO", status_todos, ['MEAB', 'METR', 'METR ORAS'], "fs")
+    # Status disponibles dado el filtro zona+programador (solo avisos tienen status)
+    status_todos = av_temp['Status Filtro'].unique()
+    status_sel = filtro_gerencial("STATUS AVISO", status_todos, "fs")
 
 av_temp = av_temp[av_temp['Status Filtro'].isin(status_sel)]
 
 with col_f4:
+    # Prioridades unificadas (texto) dado el filtro acumulado
     prioridades_todos = list(set(av_temp['Prioridad'].unique()) | set(om_temp['Prioridad'].unique()))
-    prioridades_sel = filtro_gerencial("PRIORIDAD", prioridades_todos, [], "fpr")
+    prioridades_sel = filtro_gerencial("PRIORIDAD", prioridades_todos, "fpr", sort_func=sort_prioridades)
 
 av_temp = av_temp[av_temp['Prioridad'].isin(prioridades_sel)]
 om_temp = om_temp[om_temp['Prioridad'].isin(prioridades_sel)]
 
 with col_f5:
+    # Ubicaciones técnicas del contexto completamente filtrado (cascada real)
     lineas_todos = list(set(av_temp['Denominación de la ubicación técnica'].unique()) | set(om_temp['Denominación de la ubicación técnica'].unique()))
-    lineas_sel = filtro_gerencial("UBICACIÓN TÉCNICA", lineas_todos, [], "fl")
+    lineas_sel = filtro_gerencial("UBICACIÓN TÉCNICA", lineas_todos, "fl")
 
 # DF FINALES PARA EL DASHBOARD
 av_filt = av_temp[av_temp['Denominación de la ubicación técnica'].isin(lineas_sel)]
@@ -701,6 +756,7 @@ with tab2:
 # ---------------------------------------------------------------------
 with tab3:
     st.subheader("Evolución de Solicitudes (Mensual/Anual)")
+    st.caption("📅 Los datos se agrupan por la **fecha de creación** del aviso (campo 'Creado el' del IW28).")
     av_time = av_filt.dropna(subset=['Creado el']).copy()
     if not av_time.empty:
         av_time['Año'] = av_time['Creado el'].dt.year.astype(str)
@@ -726,36 +782,144 @@ with tab3:
 # TAB 4: EFICIENCIA Y COSTOS POR PROGRAMADOR
 # ---------------------------------------------------------------------
 with tab4:
-    st.subheader("Análisis de Eficiencia Presupuestaria")
-    
+    # ----------------------------------------------------------------
+    # SECCIÓN 1: CARGA DE TRABAJO POR PROGRAMADOR (OMs creadas × día)
+    # ----------------------------------------------------------------
+    st.subheader("📦 Carga de Trabajo por Programador")
+    st.caption("Contador de OMs creadas por día y por programador, basado en la fecha de creación del IW38.")
+
+    if not om_filt.empty and 'Fecha Creacion OM' in om_filt.columns:
+        df_carga = om_filt.dropna(subset=['Fecha Creacion OM']).copy()
+        df_carga['Fecha'] = df_carga['Fecha Creacion OM'].dt.date
+
+        fechas_validas = df_carga['Fecha'].dropna()
+        if not fechas_validas.empty:
+            f_min, f_max = fechas_validas.min(), fechas_validas.max()
+            col_d1, col_d2, col_d3 = st.columns([2, 2, 6])
+            with col_d1:
+                fecha_inicio = st.date_input("📅 Desde", value=f_min, min_value=f_min, max_value=f_max, key="carga_desde")
+            with col_d2:
+                fecha_fin = st.date_input("📅 Hasta", value=f_max, min_value=f_min, max_value=f_max, key="carga_hasta")
+            df_carga = df_carga[(df_carga['Fecha'] >= fecha_inicio) & (df_carga['Fecha'] <= fecha_fin)]
+
+        # Tabla resumen: total OMs, días activos, promedio diario
+        df_resumen_carga = df_carga.groupby('Programador').agg(
+            Total_OMs=('Orden', 'count'),
+            Dias_Activos=('Fecha', 'nunique'),
+        ).reset_index()
+        df_resumen_carga['Promedio_OMs_por_Dia'] = (
+            df_resumen_carga['Total_OMs'] / df_resumen_carga['Dias_Activos']
+        ).round(1)
+        df_resumen_carga.rename(columns={
+            'Total_OMs': 'Total OMs',
+            'Dias_Activos': 'Días con Actividad',
+            'Promedio_OMs_por_Dia': 'Promedio OMs/Día'
+        }, inplace=True)
+        # Fila de total
+        total_carga = pd.DataFrame({
+            'Programador': ['Total general'],
+            'Total OMs': [int(df_resumen_carga['Total OMs'].sum())],
+            'Días con Actividad': ['-'],
+            'Promedio OMs/Día': ['-']
+        })
+        st.dataframe(
+            pd.concat([df_resumen_carga, total_carga], ignore_index=True),
+            use_container_width=True, hide_index=True
+        )
+
+        # Toggle + selector de tipo de gráfico
+        if st.toggle("📊 Mostrar Gráfico de Carga de Trabajo"):
+            tipo_graf = st.radio(
+                "Tipo de gráfico:",
+                ["📊 Barras por Día", "📅 Barras por Semana", "📈 Línea de Tendencia", "🗓️ Heatmap"],
+                horizontal=True,
+                key="tipo_grafico_carga"
+            )
+
+            df_agg_dia = df_carga.groupby(['Fecha', 'Programador']).size().reset_index(name='OMs Creadas')
+            df_agg_dia['Fecha'] = pd.to_datetime(df_agg_dia['Fecha'])
+            colores_prog = ['#006580', '#A3334E', '#E5CDA8', '#7AB3A2', '#4C2C69']
+
+            if tipo_graf == "📊 Barras por Día":
+                fig_carga = px.bar(
+                    df_agg_dia, x='Fecha', y='OMs Creadas', color='Programador',
+                    barmode='group', text='OMs Creadas',
+                    color_discrete_sequence=colores_prog,
+                    labels={'Fecha': 'Fecha de Creación', 'OMs Creadas': 'Nº OMs'}
+                )
+                fig_carga.update_traces(textposition='outside')
+                fig_carga.update_xaxes(tickformat='%d-%m-%Y', tickangle=45)
+
+            elif tipo_graf == "📅 Barras por Semana":
+                df_agg_dia['Semana'] = df_agg_dia['Fecha'].dt.to_period('W').astype(str)
+                df_sem = df_agg_dia.groupby(['Semana', 'Programador'])['OMs Creadas'].sum().reset_index()
+                fig_carga = px.bar(
+                    df_sem, x='Semana', y='OMs Creadas', color='Programador',
+                    barmode='group', text='OMs Creadas',
+                    color_discrete_sequence=colores_prog,
+                    labels={'Semana': 'Semana', 'OMs Creadas': 'Nº OMs'}
+                )
+                fig_carga.update_traces(textposition='outside')
+                fig_carga.update_xaxes(tickangle=45)
+
+            elif tipo_graf == "📈 Línea de Tendencia":
+                fig_carga = px.line(
+                    df_agg_dia, x='Fecha', y='OMs Creadas', color='Programador',
+                    markers=True,
+                    color_discrete_sequence=colores_prog,
+                    labels={'Fecha': 'Fecha de Creación', 'OMs Creadas': 'Nº OMs'}
+                )
+                fig_carga.update_xaxes(tickformat='%d-%m-%Y', tickangle=45)
+
+            elif tipo_graf == "🗓️ Heatmap":
+                fig_carga = px.density_heatmap(
+                    df_agg_dia, x='Fecha', y='Programador', z='OMs Creadas',
+                    color_continuous_scale='Blues',
+                    labels={'Fecha': 'Fecha', 'Programador': 'Programador', 'OMs Creadas': 'OMs'}
+                )
+                fig_carga.update_xaxes(tickformat='%d-%m-%Y', tickangle=45)
+
+            fig_carga.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                height=420,
+                margin=dict(t=30, b=10, l=10, r=10)
+            )
+            st.plotly_chart(fig_carga, use_container_width=True)
+    else:
+        st.info("No hay datos de carga de trabajo disponibles para el período seleccionado.")
+
+    # ----------------------------------------------------------------
+    # SECCIÓN 2: EFICIENCIA PRESUPUESTARIA (sección secundaria)
+    # ----------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("💰 Análisis de Eficiencia Presupuestaria")
+
     if not om_filt.empty:
         df_eficiencia = om_filt.groupby('Programador').agg(
-            Planificado=('Tota general (plan)', 'sum'), 
-            Real=('Costes tot.reales', 'sum'), 
+            Planificado=('Tota general (plan)', 'sum'),
+            Real=('Costes tot.reales', 'sum'),
             Cant_OMs=('Orden', 'count')
         ).reset_index()
-        
+
         df_eficiencia['Desviacion_CLP'] = df_eficiencia['Real'] - df_eficiencia['Planificado']
-        
+
         fig_costos = px.bar(
-            df_eficiencia.melt(id_vars='Programador', value_vars=['Planificado', 'Real']), 
-            x='Programador', y='value', color='variable', barmode='group', 
+            df_eficiencia.melt(id_vars='Programador', value_vars=['Planificado', 'Real']),
+            x='Programador', y='value', color='variable', barmode='group',
             title="Comparativa Planificado vs Real por Programador",
             labels={'value': 'Monto (CLP)', 'variable': 'Tipo de Costo'},
             color_discrete_sequence=['#006580', '#A3334E']
         )
         fig_costos.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_costos, use_container_width=True)
-        
+
         st.markdown("### Detalle de Desviaciones (CLP)")
-        
-        # --- AQUÍ SE QUITA EL COLOR Y SE DA UN FORMATO LIMPIO ---
         df_eficiencia_disp = df_eficiencia.copy()
-        for col in ['Planificado', 'Real', 'Desviacion_CLP']:
-            df_eficiencia_disp[col] = df_eficiencia_disp[col].apply(lambda x: f"${x:,.0f}".replace(',', '.'))
-            
+        for col_e in ['Planificado', 'Real', 'Desviacion_CLP']:
+            df_eficiencia_disp[col_e] = df_eficiencia_disp[col_e].apply(lambda x: f"${x:,.0f}".replace(',', '.'))
         st.dataframe(df_eficiencia_disp, use_container_width=True, hide_index=True)
-    else: 
+    else:
         st.info("No hay datos de costos suficientes para el análisis.")
 
 # ---------------------------------------------------------------------
@@ -770,5 +934,11 @@ with tab5:
     st.markdown("---")
     st.subheader("Matriz Interactiva (OMs)")
     if not om_filt.empty:
-        st.dataframe(om_filt[['Orden', 'ZONA', 'Programador', 'Status de usuario', 'Prioridad', 'Denominación de la ubicación técnica', 'Tota general (plan)', 'Costes tot.reales']], use_container_width=True, hide_index=True)
-    else: st.info("No hay datos de OMs para mostrar.")
+        # Columnas base + columnas opcionales (Equipo, Texto breve, Denom. objeto técnico)
+        cols_om_base = ['Orden', 'ZONA', 'Programador', 'Status de usuario', 'Prioridad',
+                        'Denominación de la ubicación técnica', 'Tota general (plan)', 'Costes tot.reales']
+        cols_om_extra = [c for c in ['Equipo', 'Texto breve', 'Denominación de objeto técnico']
+                         if c in om_filt.columns]
+        st.dataframe(om_filt[cols_om_base + cols_om_extra], use_container_width=True, hide_index=True)
+    else:
+        st.info("No hay datos de OMs para mostrar.")
