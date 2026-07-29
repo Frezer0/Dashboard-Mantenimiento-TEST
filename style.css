@@ -1,0 +1,116 @@
+/* Congelar altura de los selectores para no deformar el Layout */
+div[data-baseweb="select"]>div {
+    max-height: 85px;
+    overflow-y: auto;
+    border-radius: 2px;
+}
+
+/* Botón de limpiar filtros minimalista*/
+.stButton>button {
+    border: 1px solid #D9D9D9 !important;
+    color: #666666 !important;
+    background-color: #FFFFFF !important;
+    transition: all 0.2s;
+    padding: 2px 12px !important;
+    /* Reduce el relleno interno */
+    font-size: 0.75rem !important;
+    /* Letra más pequeña */
+    min-height: 26px !important;
+    /* Destruye el alto gigante por defecto de Streamlit */
+    height: 28px !important;
+    /* Fija una altura delgada y elegante */
+    border-radius: 2px !important;
+    /* Borde cuadrado estilo Qlik */
+    line-height: 1 !important;
+    white-space: nowrap !important; /* Fuerza a que todo quede en una sola línea */
+}
+
+.stButton>button:hover {
+    border-color: #A3334E !important;
+    /* Un toque rojo sutil al pasar el mouse (indica acción de borrar) */
+    color: #A3334E !important;
+}
+
+/* =======================================================
+   ESTILO QLIK SENSE - DASHBOARD MANTENIMIENTO
+   ======================================================= */
+
+#MainMenu {
+    visibility: hidden;
+}
+
+footer {
+    visibility: hidden;
+}
+
+header {
+    visibility: hidden;
+}
+
+.block-container {
+    padding-top: 2rem;
+    padding-bottom: 2rem;
+    max-width: 95%;
+    /* Qlik usa casi todo el ancho de la pantalla */
+}
+
+/* =======================================================
+   CAJAS DE FILTROS SUPERIORES (Simulación Qlik)
+   ======================================================= */
+div[data-testid="stForm"],
+div[data-testid="stMultiSelect"] {
+    background-color: #FFFFFF;
+    border: 1px solid #D9D9D9;
+    border-radius: 2px;
+}
+
+div[data-testid="stMultiSelect"] label {
+    font-size: 0.8rem;
+    color: #555555;
+    text-transform: uppercase;
+    font-weight: 600;
+}
+
+/* =======================================================
+   TARJETAS DE MÉTRICAS (KPIs QLIK)
+   ======================================================= */
+div[data-testid="metric-container"] {
+    background-color: #FFFFFF;
+    border: 1px solid #D9D9D9;
+    /* Borde fino, sin sombra */
+    border-radius: 2px;
+    /* Qlik es muy cuadrado */
+    padding: 15px 10px;
+    text-align: center;
+    /* Qlik centra todos sus KPIs */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+/* Etiqueta del KPI (Ej: "AVISOS TRATADOS SIN OM") */
+div[data-testid="metric-container"] label {
+    color: #666666;
+    font-size: 0.85rem;
+    font-weight: 500;
+    text-transform: capitalize;
+}
+
+/* Valor numérico del KPI */
+div[data-testid="metric-container"] div {
+    color: #006580 !important;
+    /* El clásico color Teal de los números en Qlik */
+    font-size: 2.2rem !important;
+    font-weight: 400;
+}
+
+/* =======================================================
+   CONTENEDORES DE GRÁFICOS (Hojas de Qlik)
+   ======================================================= */
+/* Le damos fondo blanco a las columnas donde van los gráficos */
+div[data-testid="stVerticalBlock"]>div>div[data-testid="stVerticalBlock"] {
+    background-color: #FFFFFF;
+    border: 1px solid #D9D9D9;
+    border-radius: 2px;
+    padding: 15px;
+}

@@ -1,0 +1,9 @@
+[theme]
+primaryColor = "#006580"           # Teal/Petróleo de Qlik (Botones y acentos)
+backgroundColor = "#F5F5F5"        # Gris claro (Fondo del lienzo principal)
+secondaryBackgroundColor = "#FFFFFF" # Blanco puro (Cajas de filtros)
+textColor = "#333333"              # Gris oscuro (Textos generales)
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"
