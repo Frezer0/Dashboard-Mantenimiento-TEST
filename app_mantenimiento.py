@@ -610,10 +610,10 @@ total_plan = om_filt['Tota general (plan)'].sum()
 total_real = om_filt['Costes tot.reales'].sum()
 desviacion_clp = total_real - total_plan
 
-col_k1.metric("COSTO PLANIFICADO", f"${total_plan:,.0f}".replace(',', '.'))
+col_k1.metric("AVISOS ACTIVOS", f"{len(av_filt):,}")
 col_k2.metric("COSTO REAL", f"${total_real:,.0f}".replace(',', '.'))
 col_k3.metric("DESVIACIÓN (CLP)", f"${desviacion_clp:,.0f}".replace(',', '.'))
-col_k4.metric("AVISOS ACTIVOS", f"{len(av_filt):,}")
+col_k4.metric("COSTO PLANIFICADO", f"${total_plan:,.0f}".replace(',', '.'))
 col_k5.metric("FECHA ACTUALIZACIÓN", datetime.today().strftime('%d-%m-%Y'))
 st.markdown("<br>", unsafe_allow_html=True)
 
