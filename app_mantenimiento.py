@@ -636,14 +636,33 @@ with tab_om:
     
     st.subheader("✅ Resumen de OMs por Programador")
     if not om_filt.empty:
+        st.markdown(f"<h4 style='color: #006580;'>TOTAL OMs: {len(om_filt)}</h4>", unsafe_allow_html=True)
+        
         # 1. Crear Tabla Pivot
-        tabla_oms_pivot = pd.crosstab(index=om_filt['Programador'], columns=om_filt['Status de usuario'], margins=True, margins_name='Total general').reset_index()
+        df_grouped_om = om_filt.copy()
+        def agrupar_om(s):
+            s = str(s).upper()
+            if 'CREA' in s: return 'CREA'
+            if 'PPRG' in s: return 'PPRG'
+            if 'PPLN' in s: return 'PPLN'
+            if 'PLAN' in s: return 'PLAN'
+            if 'RETE' in s: return 'RETE'
+            return 'OTRO'
+        df_grouped_om['Status Agrupado'] = df_grouped_om['Status de usuario'].apply(agrupar_om)
+        
+        tabla_oms_pivot = pd.crosstab(index=df_grouped_om['Programador'], columns=df_grouped_om['Status Agrupado'], margins=True, margins_name='TOTAL OMs')
+        
+        cols_deseadas_om = ['CREA', 'PPRG', 'PPLN', 'PLAN', 'RETE', 'TOTAL OMs']
+        for col in cols_deseadas_om:
+            if col not in tabla_oms_pivot.columns: tabla_oms_pivot[col] = 0
+        tabla_oms_pivot = tabla_oms_pivot[cols_deseadas_om].reset_index()
+        
         st.dataframe(tabla_oms_pivot, use_container_width=True, hide_index=True)
         
         # 2. Botón Interruptor para Gráficos
         if st.toggle("📊 Mostrar gráficos de OMs", key="toggle_graf_om"):
             st.markdown("<div class='qlik-container'>", unsafe_allow_html=True)
-            col_g_om1, col_g_om2 = st.columns(2)
+            col_g_om1, col_g_om2, col_g_om3 = st.columns(3)
             
             with col_g_om1:
                 st.markdown("**OMs por Prioridad**")
@@ -655,10 +674,18 @@ with tab_om:
                 
             with col_g_om2:
                 st.markdown("**OMs por Status y Programador**")
-                df_om_bar = om_filt.groupby(['Programador', 'Status de usuario']).size().reset_index(name='Cantidad')
-                fig_bar_om = px.bar(df_om_bar, x='Programador', y='Cantidad', color='Status de usuario', color_discrete_sequence=qlik_colors)
+                df_om_bar = df_grouped_om.groupby(['Programador', 'Status Agrupado']).size().reset_index(name='Cantidad')
+                fig_bar_om = px.bar(df_om_bar, x='Programador', y='Cantidad', color='Status Agrupado', color_discrete_sequence=qlik_colors)
                 fig_bar_om.update_layout(margin=dict(t=10, b=10, l=10, r=10), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_bar_om, use_container_width=True)
+                
+            with col_g_om3:
+                st.markdown("**Total OMs por Centro de Emplazamiento**")
+                df_centro = om_filt.groupby('ZONA').size().reset_index(name='Total OMs')
+                fig_bar = px.bar(df_centro, x='ZONA', y='Total OMs', color='ZONA', text='Total OMs', color_discrete_map={'ARAUCO': '#DEB887', 'CHILLAN': '#800040', 'OTRAS': '#006580'})
+                fig_bar.update_traces(textposition='outside')
+                fig_bar.update_layout(margin=dict(t=10, b=10, l=10, r=10), showlegend=False, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                st.plotly_chart(fig_bar, use_container_width=True)
                 
             st.markdown("</div>", unsafe_allow_html=True)
     else: 
@@ -673,11 +700,27 @@ with tab1:
     # --- SECCIÓN 1: RESUMEN DE AVISOS ---
     st.subheader("📋 Resumen de Avisos por Programador")
     if not av_filt.empty:
+        st.markdown(f"<h4 style='color: #006580;'>TOTAL AVISOS: {len(av_filt)}</h4>", unsafe_allow_html=True)
+        
         # 1. Crear Tabla
-        tabla_avisos_pivot = pd.crosstab(index=av_filt['Programador'], columns=av_filt['Status Filtro'], margins=True, margins_name='Total general')
-        cols_deseadas = ['MEAB', 'METR', 'METR ORAS', 'Total general']
+        df_grouped_av = av_filt.copy()
+        
+        # Mapeo según requerimiento del cliente
+        def agrupar_av(s):
+            s = str(s).upper()
+            if 'MEAB' in s: return 'Avisos Sin Aprovacion'
+            if 'METR' in s: return 'Avisos tratados Sin OM'
+            if 'RECH' in s or 'MECE' in s or 'MAEN' in s: return 'Avisos Rechazados'
+            return s
+            
+        df_grouped_av['Status Renombrado'] = df_grouped_av['Status Filtro'].apply(agrupar_av)
+        
+        tabla_avisos_pivot = pd.crosstab(index=df_grouped_av['Programador'], columns=df_grouped_av['Status Renombrado'], margins=True, margins_name='TOTAL Avisos')
+        cols_deseadas = ['Avisos tratados Sin OM', 'Avisos Sin Aprovacion', 'Avisos Rechazados', 'TOTAL Avisos']
+        
         for col in cols_deseadas:
             if col not in tabla_avisos_pivot.columns: tabla_avisos_pivot[col] = 0
+            
         tabla_avisos_pivot = tabla_avisos_pivot[cols_deseadas].reset_index()
         
         st.dataframe(tabla_avisos_pivot, use_container_width=True, hide_index=True)
@@ -732,23 +775,15 @@ with tab1:
             col_g3, col_g4 = st.columns(2)
             
             with col_g3:
-                st.markdown("**Total OMs por Centro de Emplazamiento**")
-                if not om_filt.empty:
-                    df_centro = om_filt.groupby('ZONA').size().reset_index(name='Total OMs')
-                    fig_bar = px.bar(df_centro, x='ZONA', y='Total OMs', color='ZONA', text='Total OMs', color_discrete_map={'ARAUCO': '#DEB887', 'CHILLAN': '#800040', 'OTRAS': '#006580'})
-                    fig_bar.update_traces(textposition='outside')
-                    fig_bar.update_layout(margin=dict(t=10, b=10, l=10, r=10), showlegend=False, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-                    st.plotly_chart(fig_bar, use_container_width=True)
-                else: 
-                    st.info("Sin datos")
-                    
-            with col_g4:
                 st.markdown("**Costo Planificado por Programador**")
                 # Se grafica omitiendo el "Total general" para no distorsionar las barras
                 fig_cost = px.bar(comb_df, x='Programador', y='Suma_Plan', text='Suma_Plan', color_discrete_sequence=['#006580'])
                 fig_cost.update_traces(texttemplate='$%{text:,.0f}', textposition='outside')
                 fig_cost.update_layout(margin=dict(t=10, b=10, l=10, r=10), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_cost, use_container_width=True)
+                
+            with col_g4:
+                st.empty() # Espacio disponible si se agrega otro gráfico
                 
             st.markdown("</div>", unsafe_allow_html=True)
             
@@ -979,4 +1014,3 @@ with tab5:
         st.dataframe(om_filt[cols_om_base + cols_om_extra], use_container_width=True, hide_index=True)
     else:
         st.info("No hay datos de OMs para mostrar.")
-
