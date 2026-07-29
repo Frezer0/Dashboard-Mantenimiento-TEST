@@ -636,7 +636,19 @@ with tab_om:
     
     st.subheader("✅ Resumen de OMs por Programador")
     if not om_filt.empty:
-        st.markdown(f"<h4 style='color: #006580;'>TOTAL OMs: {len(om_filt)}</h4>", unsafe_allow_html=True)
+        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+        col_m1.metric("TOTAL OMs", len(om_filt))
+        
+        # Métricas cruzadas de Avisos
+        cant_tratados = len(av_filt[av_filt['Status Filtro'].str.contains('METR', na=False, case=False)])
+        cant_sin_aprob = len(av_filt[av_filt['Status Filtro'].str.contains('MEAB', na=False, case=False)])
+        cant_rechazados = len(av_filt[av_filt['Status Filtro'].str.contains('MECE|MAEN|RECH', na=False, regex=True, case=False)])
+        
+        col_m2.metric("Avisos tratados Sin OM", cant_tratados)
+        col_m3.metric("Avisos Sin Aprovacion", cant_sin_aprob)
+        col_m4.metric("Avisos Rechazados", cant_rechazados)
+        
+        st.markdown("<hr style='margin-top: 0.5rem; margin-bottom: 1rem;'>", unsafe_allow_html=True)
         
         # 1. Crear Tabla Pivot
         df_grouped_om = om_filt.copy()
@@ -700,7 +712,23 @@ with tab1:
     # --- SECCIÓN 1: RESUMEN DE AVISOS ---
     st.subheader("📋 Resumen de Avisos por Programador")
     if not av_filt.empty:
-        st.markdown(f"<h4 style='color: #006580;'>TOTAL AVISOS: {len(av_filt)}</h4>", unsafe_allow_html=True)
+        col_m1, col_m2, col_m3, col_m4, col_m5, col_m6 = st.columns(6)
+        col_m1.metric("TOTAL AVISOS", len(av_filt))
+        
+        # Métricas cruzadas de OMs
+        cant_crea = len(om_filt[om_filt['Status de usuario'].str.contains('CREA', na=False, case=False)])
+        cant_pprg = len(om_filt[om_filt['Status de usuario'].str.contains('PPRG', na=False, case=False)])
+        cant_ppln = len(om_filt[om_filt['Status de usuario'].str.contains('PPLN', na=False, case=False)])
+        cant_plan = len(om_filt[om_filt['Status de usuario'].str.contains('PLAN', na=False, case=False)])
+        cant_rete = len(om_filt[om_filt['Status de usuario'].str.contains('RETE', na=False, case=False)])
+        
+        col_m2.metric("CREA", cant_crea)
+        col_m3.metric("PPRG", cant_pprg)
+        col_m4.metric("PPLN", cant_ppln)
+        col_m5.metric("PLAN", cant_plan)
+        col_m6.metric("RETE", cant_rete)
+        
+        st.markdown("<hr style='margin-top: 0.5rem; margin-bottom: 1rem;'>", unsafe_allow_html=True)
         
         # 1. Crear Tabla
         df_grouped_av = av_filt.copy()
@@ -1014,3 +1042,4 @@ with tab5:
         st.dataframe(om_filt[cols_om_base + cols_om_extra], use_container_width=True, hide_index=True)
     else:
         st.info("No hay datos de OMs para mostrar.")
+
