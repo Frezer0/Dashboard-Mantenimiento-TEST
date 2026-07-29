@@ -623,7 +623,7 @@ st.markdown("<br>", unsafe_allow_html=True)
 # PESTAÑAS DE CONTENIDO (TODO INCLUIDO)
 # =====================================================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📊 Resumen Ejecutivo", 
+    "📊 Resumen Avisos", 
     "📋 Detalle Avisos y OMs", 
     "📅 Línea de Tiempo", 
     "👥 Carga de Trabajo", 
