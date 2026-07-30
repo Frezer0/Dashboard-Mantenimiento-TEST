@@ -4,7 +4,6 @@ import re
 import plotly.express as px
 import os
 from datetime import datetime
-import extra_streamlit_components as stx
 
 import sqlalchemy  # DB Sql Progress
 from sqlalchemy import text # para ejecutar SQL directo
@@ -12,8 +11,10 @@ from sqlalchemy import text # para ejecutar SQL directo
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # =====================================================================
+# =====================================================================
 # CONSTANTES DE NEGOCIO — PRIORIDADES
 # =====================================================================
+QLIK_COLORS = ['#006580', '#A3334E', '#E5CDA8', '#7AB3A2', '#4C2C69']
 # Mapeo de prioridad numérica (IW38/OMs) a texto unificado (igual que IW28/Avisos)
 MAPEO_PRIORIDAD_OM = {
     1.0: '1 Muy Alta',
@@ -42,6 +43,8 @@ def cargar_datos():
         engine = sqlalchemy.create_engine(DATABASE_URL)
         avisos_df = pd.read_sql("SELECT * FROM avisos", engine)
         oms_df = pd.read_sql("SELECT * FROM oms", engine)
+        #avisos_df = pd.read_excel('Avisos IW28.xlsx')
+        #oms_df = pd.read_excel('OMs IW38.xlsx')
         
         columnas_clave = [
             'Centro emplazamiento', 'Grupo planificación', 'Denominación de la ubicación técnica', 
@@ -57,6 +60,7 @@ def cargar_datos():
                 
         return avisos_df, oms_df
     except Exception as e:
+        st.error(f"⚠️ No se pudieron cargar los datos. Revisa los archivos Excel o la conexión a la base de datos. Detalle: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
 # =====================================================================
@@ -64,216 +68,134 @@ def cargar_datos():
 # =====================================================================
 st.set_page_config(page_title="Gestión de Avisos PPCM", layout="wide", page_icon="📊")
 
-st.markdown("""
-    <style>
-    /* Ocultar elementos predeterminados de Streamlit */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
+with open('style.css', 'r', encoding='utf-8') as f:
+    css_content = f.read()
+st.markdown(f"<style>{css_content}</style>", unsafe_allow_html=True)
 
-    /* Fondo principal y contenedor */
+# =====================================================================
+# SISTEMA DE SESIÓN (IDENTIFICACIÓN DE USUARIOS)
+# =====================================================================
+if "usuario_activo" not in st.session_state:
+    st.session_state.usuario_activo = None
+
+# Pantalla de Login Premium
+if st.session_state.usuario_activo is None:
+    st.markdown("""
+    <style>
+    /* Fondo degradado en toda la página */
     .stApp {
-        background-color: #F5F5F5;
+        background: linear-gradient(135deg, #0a2a35 0%, #006580 50%, #0d4a5e 100%) !important;
     }
     .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-        max-width: 98%;
+        padding-top: 12vh !important;
     }
-
-    /* Cajas de filtros multiselect (Simulación Qlik) */
-    div[data-testid="stMultiSelect"] {
-        background-color: #FFFFFF;
-        border: 1px solid #D9D9D9;
-        border-radius: 2px;
-        padding: 5px;
+    /* Ocultar sidebar en login */
+    [data-testid="stSidebar"] { display: none !important; }
+    /* La CARD es el stForm */
+    [data-testid="stForm"] {
+        background: #ffffff !important;
+        border: none !important;
+        border-radius: 16px !important;
+        padding: 32px 32px 24px !important;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.2) !important;
+        animation: loginUp 0.4s ease !important;
     }
-    div[data-testid="stMultiSelect"] label {
-        font-size: 0.8rem;
-        color: #555555;
-        text-transform: uppercase;
-        font-weight: 700;
+    @keyframes loginUp {
+        from { opacity:0; transform: translateY(18px); }
+        to   { opacity:1; transform: translateY(0); }
     }
-
-    /* Tarjetas de Métricas (KPIs QLIK) */
-    div[data-testid="metric-container"] {
-        background-color: #FFFFFF;
-        border: 1px solid #D9D9D9;
-        border-radius: 2px;
-        padding: 15px 10px;
-        text-align: center;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        box-shadow: 0px 1px 3px rgba(0,0,0,0.05);
-    }
-    div[data-testid="metric-container"] label {
-        color: #666666;
-        font-size: 0.85rem;
-        font-weight: 600;
-    }
-    div[data-testid="metric-container"] div {
-        color: #006580 !important; /* Color Teal Qlik */
-        font-size: 2.2rem !important;
-        font-weight: 400;
-    }
-
-    /* Estilo para las pestañas de Streamlit */
-    .stTabs [data-baseweb="tab-list"] {
-        background-color: #FFFFFF;
-        border-bottom: 1px solid #D9D9D9;
-        padding-left: 10px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        color: #555555;
-        font-weight: 600;
-        padding-top: 10px;
-        padding-bottom: 10px;
-    }
-    
-    /* Contenedores blancos para gráficos */
-    .qlik-container {
-        background-color: #FFFFFF;
-        border: 1px solid #D9D9D9;
-        border-radius: 2px;
-        padding: 15px;
-        margin-bottom: 15px;
-    }
-    span[data-baseweb="tag"] {
-        background-color: #EFEFEF !important; /* Fondo gris muy suave */
-        color: #444444 !important;            /* Texto oscuro */
-        border: 1px solid #E0E0E0 !important; /* Borde apenas visible */
-        border-radius: 4px !important;        /* Bordes ligeramente redondeados */
-        font-weight: 400 !important;
-    }
-    
-    /* Cambiar el color del ícono "X" para cerrar el tag */
-    span[data-baseweb="tag"] span[role="button"] {
-        color: #666666 !important;
-    }
-    span[data-baseweb="tag"] span[role="button"]:hover {
-        background-color: transparent !important;
-        color: #000000 !important; /* Se oscurece un poco al pasar el mouse */
-    }
-    span[data-baseweb="tag"] svg {
-        fill: #888888 !important;
-    }
-    /* =======================================================
-       ESTILOS PREMIUM PARA LA BARRA LATERAL (SIDEBAR)
-       ======================================================= */
-    /* Fondo limpio para la barra lateral */
-    [data-testid="stSidebar"] {
-        background-color: #FAFAFA !important;
-        border-right: 1px solid #E5E7EB !important;
-    }
-
-    /* Tarjeta de Usuario Minimalista */
-    .user-card {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        padding: 10px 14px;
-        margin-bottom: 8px;
-        background: #FFFFFF;
-        border: 1px solid #E5E7EB;
-        border-radius: 6px;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.03);
-        font-size: 0.88rem;
-        color: #374151;
-        transition: all 0.2s ease;
-    }
-
-    /* Tarjeta para el Usuario Actual */
-    .user-card-you {
-        border-left: 3px solid #006580 !important;
-        background-color: #F0F9FA !important;
-    }
-
-    .user-info {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-    }
-
-    /* Punto verde con brillo suave (Efecto En Línea) */
-    .status-dot {
-        width: 8px;
-        height: 8px;
-        background-color: #10B981;
-        border-radius: 50%;
-        box-shadow: 0 0 6px rgba(16, 185, 129, 0.6);
-        display: inline-block;
-    }
-
-    /* Badge "Tú" */
-    .badge-you {
-        font-size: 0.68rem;
-        font-weight: 700;
-        color: #006580;
-        background: #E0F2FE;
-        padding: 2px 8px;
-        border-radius: 12px;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-    }
-
-    /* Estilo elegante para el botón de Cerrar Sesión en la Sidebar */
-    [data-testid="stSidebar"] button {
-        border: 1px solid #D1D5DB !important;
-        background-color: #FFFFFF !important;
-        color: #4B5563 !important;
-        font-size: 0.82rem !important;
-        font-weight: 500 !important;
-        border-radius: 6px !important;
-        padding: 6px 12px !important;
+    /* Input */
+    [data-testid="stTextInput"] > div > div > input {
+        border-radius: 8px !important;
+        border: 1px solid #E2E8F0 !important;
+        padding: 12px 14px !important;
+        font-size: 0.9rem !important;
+        background: #F8FAFC !important;
+        color: #0F172A !important;
         transition: all 0.2s ease !important;
     }
-
-    [data-testid="stSidebar"] button:hover {
-        border-color: #EF4444 !important;
-        color: #EF4444 !important;
-        background-color: #FEF2F2 !important;
+    [data-testid="stTextInput"] > div > div > input:focus {
+        border-color: #006580 !important;
+        box-shadow: 0 0 0 2px rgba(0,101,128,0.15) !important;
+        background: #fff !important;
     }
-    
+    /* Botón */
+    [data-testid="stFormSubmitButton"] button {
+        background: linear-gradient(135deg, #006580, #0a4a5e) !important;
+        color: white !important;
+        border-radius: 8px !important;
+        border: none !important;
+        font-weight: 600 !important;
+        font-size: 0.9rem !important;
+        padding: 10px !important;
+        box-shadow: 0 4px 10px rgba(0,101,128,0.3) !important;
+        transition: all 0.2s ease !important;
+        margin-top: 10px !important;
+    }
+    [data-testid="stFormSubmitButton"] button:hover {
+        background: linear-gradient(135deg, #004d61, #083847) !important;
+        box-shadow: 0 6px 15px rgba(0,101,128,0.4) !important;
+        transform: translateY(-1px) !important;
+    }
     </style>
-""", unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
-# =====================================================================
-# SISTEMA DE SESIÓN (IDENTIFICACIÓN DE USUARIOS - CON COOKIES)
-# =====================================================================
+    col1, col_login, col3 = st.columns([1.2, 1.3, 1.2])
+    with col_login:
+        with st.form("form_login", clear_on_submit=False):
+            # Todo el encabezado va DENTRO del form para que sea una sola card unificada
+            st.markdown("""
+        <div style="text-align:center; margin-bottom:15px;">
+            <span style="
+                display:inline-flex; align-items:center; justify-content:center;
+                width:50px; height:50px;
+                background: linear-gradient(135deg, #006580, #0a2a35);
+                border-radius:12px; font-size:1.4rem;
+                box-shadow: 0 6px 16px rgba(0,101,128,0.3);
+                margin-bottom:12px;
+            ">📊</span>
+            <h2 style="
+                color:#0F172A; font-size:1.4rem; font-weight:700;
+                letter-spacing:-0.02em; margin:0 0 4px;
+            ">Gestión PPCM</h2>
+            <p style="color:#64748B; font-size:0.85rem; margin:0 0 12px;">
+                Portal de Análisis &middot; Mantenimiento
+            </p>
+            <p style="color:#64748B; font-size:0.8rem; margin:0 0 20px;">
+                🔒 Por favor, identifíquese para acceder a la aplicación de análisis.
+            </p>
+            <p style="
+                font-size:0.7rem; font-weight:600; color:#64748B;
+                text-transform:uppercase; letter-spacing:0.05em;
+                margin:0 0 6px; text-align:left;
+            ">Nombre de Usuario</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-# Inicializar el administrador de cookies
-cookie_manager = stx.CookieManager()
+            nombre_input = st.text_input(
+                "usuario", label_visibility="collapsed",
+                placeholder=""
+            )
+            st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+            btn_ingresar = st.form_submit_button("Ingresar →", use_container_width=True)
 
-# Intentar leer el usuario desde las cookies del navegador
-usuario_cookie = cookie_manager.get(cookie="usuario_mantenimiento")
-
-if "usuario_activo" not in st.session_state:
-    st.session_state.usuario_activo = usuario_cookie
-
-# Pantalla de Login (Si no hay sesión en memoria ni en cookies)
-if st.session_state.usuario_activo is None:
-    st.markdown("<h2 style='text-align: center; color: #006580; margin-top: 100px;'>Portal de Análisis PPCM</h2>", unsafe_allow_html=True)
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        st.info("🔒 Por favor, identifíquese para acceder a la aplicación de análisis.")
-        
-        with st.form("form_login"):
-            nombre_input = st.text_input("Nombre del Usuario:")
-            btn_ingresar = st.form_submit_button("Ingresar", use_container_width=True)
-            
             if btn_ingresar:
                 if nombre_input.strip():
-                    # Guardar en Session State
                     st.session_state.usuario_activo = nombre_input.strip()
-                    
-                    # Guardar en Cookie (dura 1 día)
-                    cookie_manager.set("usuario_mantenimiento", nombre_input.strip(), max_age=86400)
-                    
                     st.rerun()
                 else:
-                    st.error("Debe ingresar un nombre válido.")
+                    st.error("⚠️ Por favor, ingresa tu nombre para continuar.")
+
+            st.markdown("""
+            <p style="text-align:center; font-size:0.68rem; color:#CBD5E1;
+                       margin-top:18px; letter-spacing:0.03em;">
+                Solo personal autorizado
+            </p>
+            """, unsafe_allow_html=True)
+
     st.stop()
+
+
     
 # =====================================================================
 # SISTEMA DE PRESENCIA (QUIÉN ESTÁ EN LÍNEA)
@@ -357,6 +279,12 @@ def extraer_status_objetivo(status_str):
     if 'MEAB' in status_str: return 'MEAB'
     if 'MECE' in status_str: return 'MECE'
     if 'MAEN' in status_str: return 'MAEN'
+    if 'RECH' in status_str: return 'RECH'
+    if 'CREA' in status_str: return 'CREA'
+    if 'PPRG' in status_str: return 'PPRG'
+    if 'PPLN' in status_str: return 'PPLN'
+    if 'PLAN' in status_str: return 'PLAN'
+    if 'RETE' in status_str: return 'RETE'
     return 'OTRO STATUS'
 
 
@@ -390,6 +318,9 @@ def modal_actualizar():
                 
             if act:
                 st.cache_data.clear()
+                # Guardar quién hizo la actualización y cuándo
+                st.session_state['ultima_actualizacion_usuario'] = st.session_state.usuario_activo
+                st.session_state['ultima_actualizacion_hora'] = datetime.today().strftime('%d-%m-%Y %H:%M')
                 st.success("¡Datos actualizados en la nube con éxito!")
                 st.rerun()
         except Exception as e:
@@ -428,31 +359,29 @@ if st.session_state.usuario_activo:
 # =====================================================================
 # ENCABEZADO MINIMALISTA
 # =====================================================================
-col_t1, col_t2 = st.columns([8, 2])
+st.markdown("<h1 style='color: #333; font-weight: 300; margin-bottom: 0px; padding-bottom: 0px; font-size: 2.6rem;'>Gestión de avisos y OMs</h1>", unsafe_allow_html=True)
 
-with col_t1:
-    st.markdown("<h1 style='color: #333; font-weight: 300; margin-bottom: 0px; padding-bottom: 0px; font-size: 2.6rem;'>Gestión de avisos y OMs</h1>", unsafe_allow_html=True)
-    
-    # Texto en línea idéntico a tu imagen
-    st.markdown(f"""
-        <div style="font-size: 1.05rem; color: #555; margin-top: 10px; margin-bottom: 15px; display: flex; align-items: center; gap: 15px; font-family: sans-serif;">
-            <span><span style="color: #666;">👤 Usuario:</span> <b>{st.session_state.usuario_activo}</b></span>
-            <span style="color: #ccc;">|</span>
-            <span><span style="color: #2E7D32;">👥 Usuarios activos:</span> <b style="color: #333;">{len(usuarios_en_linea)}</b></span>
+# Badge de usuario + usuarios conectados + última actualización
+_label_usuarios = "Usuarios Conectados" if len(usuarios_en_linea) > 1 else "Usuario Conectado"
+_nombres_linea = " · ".join(usuarios_en_linea) if usuarios_en_linea else st.session_state.usuario_activo
+_hora_act = st.session_state.get('ultima_actualizacion_hora', datetime.today().strftime('%d-%m-%Y %H:%M'))
+_quien_act = st.session_state.get('ultima_actualizacion_usuario', '')
+_uploader_html = f'<span style="color:#CBD5E1; margin: 0 5px;">·</span><span style="color:#64748B; font-weight:500;">{_quien_act}</span>' if _quien_act else ''
+
+st.markdown(f"""
+    <div style="display: flex; align-items: center; gap: 16px; margin-top: 8px; margin-bottom: 16px; flex-wrap: wrap;">
+        <div style="display: flex; align-items: center; gap: 8px; background-color: #F1F5F9; padding: 5px 14px; border-radius: 20px; border: 1px solid #E2E8F0; font-size: 0.82rem; color: #475569;">
+            <div style="width: 7px; height: 7px; background-color: #10B981; border-radius: 50%; box-shadow: 0 0 5px rgba(16,185,129,0.5); flex-shrink:0;"></div>
+            <span style="color:#64748B; font-weight:600; letter-spacing:0.02em;">{_label_usuarios}:</span>
+            <span style="font-weight: 600; color: #0F172A;">{_nombres_linea}</span>
         </div>
-    """, unsafe_allow_html=True)
+        <div style="font-size: 0.78rem; color: #94A3B8; letter-spacing: 0.02em;">
+            Actualizado: <b style="color:#006580;">{_hora_act}</b>{_uploader_html}
+        </div>
+    </div>
+""", unsafe_allow_html=True)
 
-with col_t2:
-    if st.button("⚙️ Cargar Datos", use_container_width=True):
-        modal_actualizar()
-        
-    # Botón de cierre de sesión a prueba de fallos
-    if st.button("🚪 Cerrar Sesión", use_container_width=True):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.rerun()
-
-st.markdown("<hr style='margin-top: 0px; margin-bottom: 20px; border-top: 1px solid #ddd;'>", unsafe_allow_html=True)
+st.markdown("<hr style='margin-top: 0px; margin-bottom: 20px; border-top: 1px solid #E2E8F0;'>", unsafe_allow_html=True)
 avisos_df, oms_df = cargar_datos()
 
 
@@ -477,7 +406,7 @@ if not avisos_df.empty:
     
     if 'Creado el' in avisos_df.columns:
         avisos_df['Creado el'] = pd.to_datetime(avisos_df['Creado el'], errors='coerce')
-        avisos_df['Días Abierto'] = (pd.to_datetime('today') - avisos_df['Creado el']).dt.days
+        avisos_df['Días Abierto'] = (pd.to_datetime('today') - avisos_df['Creado el']).dt.days.clip(lower=0)
     else:
         avisos_df['Días Abierto'] = 0
         avisos_df['Creado el'] = pd.NaT
@@ -517,15 +446,33 @@ else:
     oms_df = pd.DataFrame(columns=['ZONA', 'Programador', 'Prioridad', 'Tota general (plan)', 'Costes tot.reales', 'Denominación de la ubicación técnica', 'Orden', 'Status de usuario', 'Equipo', 'Fecha Creacion OM'])
 
 # =====================================================================
-# FILTROS SUPERIORES (ESTILO QLIK - MULTISELECT CON SCROLL CSS)
+# SIDEBAR (OPCIONES Y ESTADO)
 # =====================================================================
-col_clear, _ = st.columns([1.5, 10.5])
-with col_clear:
-    if st.button("🧹 Limpiar Filtro", use_container_width=True):
-        # Resetear TODOS los filtros a lista vacía (vacío visual = ver todo)
+with st.sidebar:
+    st.markdown("""
+        <div style="padding: 6px 0 18px 0; border-bottom: 1px solid #F1F5F9; margin-bottom: 16px;">
+            <span style="font-size: 0.65rem; font-weight: 700; color: #94A3B8; text-transform: uppercase; letter-spacing: 0.08em;">Panel de control</span>
+        </div>
+    """, unsafe_allow_html=True)
+
+    if st.button("🧹  Limpiar Filtros", use_container_width=True):
         for key in ["fz", "fp", "fs", "fpr", "fl"]:
             st.session_state[key] = []
         st.rerun()
+
+    if st.button("📥  Cargar Datos", use_container_width=True):
+        modal_actualizar()
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    if st.button("🔒  Cerrar Sesión", use_container_width=True):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
+
+# =====================================================================
+# FILTROS SUPERIORES (ESTILO QLIK - MULTISELECT CON SCROLL CSS)
+# =====================================================================
+
 
 col_f1, col_f2, col_f3, col_f4, col_f5 = st.columns(5)
 
@@ -574,8 +521,10 @@ av_temp = av_temp[av_temp['Programador'].isin(progs_sel)]
 om_temp = om_temp[om_temp['Programador'].isin(progs_sel)]
 
 with col_f3:
-    # Status disponibles dado el filtro zona+programador (solo avisos tienen status)
-    status_todos = av_temp['Status Filtro'].unique()
+    # Mostrar los status que realmente existen en los datos + fallback a la lista completa
+    status_base = ['METR ORAS', 'METR', 'MEAB', 'MECE', 'MAEN', 'RECH', 'CREA', 'PPRG', 'PPLN', 'PLAN', 'RETE', 'OTRO STATUS']
+    status_reales = list(av_temp['Status Filtro'].unique()) if not av_temp.empty else []
+    status_todos = sorted(set(status_base) | set(status_reales))
     status_sel = filtro_gerencial("STATUS AVISO", status_todos, "fs")
 
 av_temp = av_temp[av_temp['Status Filtro'].isin(status_sel)]
@@ -597,34 +546,19 @@ with col_f5:
 av_filt = av_temp[av_temp['Denominación de la ubicación técnica'].isin(lineas_sel)]
 om_filt = om_temp[om_temp['Denominación de la ubicación técnica'].isin(lineas_sel)]
 
-# =====================================================================
-# KPIs PRINCIPALES
-# =====================================================================
-st.markdown("<br>", unsafe_allow_html=True)
-col_k1, col_k2, col_k3, col_k4, col_k5 = st.columns(5)
 
-total_plan = om_filt['Tota general (plan)'].sum()
-total_real = om_filt['Costes tot.reales'].sum()
-desviacion_clp = total_real - total_plan
-
-col_k1.metric("COSTO PLANIFICADO", f"${total_plan:,.0f}".replace(',', '.'))
-col_k2.metric("COSTO REAL", f"${total_real:,.0f}".replace(',', '.'))
-col_k3.metric("DESVIACIÓN (CLP)", f"${desviacion_clp:,.0f}".replace(',', '.'))
-col_k4.metric("AVISOS ACTIVOS", f"{len(av_filt):,}")
-col_k5.metric("FECHA ACTUALIZACIÓN", datetime.today().strftime('%d-%m-%Y'))
-st.markdown("<br>", unsafe_allow_html=True)
 
 
 
 # =====================================================================
 # PESTAÑAS DE CONTENIDO (TODO INCLUIDO)
 # =====================================================================
-tab_om, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab_om, tab1, tab4, tab3, tab2, tab5 = st.tabs([
     "✅ Resumen OMs",
     "📊 Resumen Avisos", 
-    "📋 Detalle Avisos y OMs", 
-    "📅 Línea de Tiempo", 
     "👥 Carga de Trabajo", 
+    "📅 Línea de Tiempo", 
+    "📋 Detalle Avisos y OMs", 
     "🗃️ Explorador de Datos"
 ])
 
@@ -632,17 +566,15 @@ tab_om, tab1, tab2, tab3, tab4, tab5 = st.tabs([
 # TAB OM: RESUMEN DE OMS
 # ---------------------------------------------------------------------
 with tab_om:
-    qlik_colors = ['#006580', '#A3334E', '#E5CDA8', '#7AB3A2', '#4C2C69']
-    
     st.subheader("✅ Resumen de OMs por Programador")
     if not om_filt.empty:
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         col_m1.metric("TOTAL OMs", len(om_filt))
         
-        # Métricas cruzadas de Avisos
-        cant_tratados = len(av_filt[av_filt['Status Filtro'].str.contains('METR', na=False, case=False)])
-        cant_sin_aprob = len(av_filt[av_filt['Status Filtro'].str.contains('MEAB', na=False, case=False)])
-        cant_rechazados = len(av_filt[av_filt['Status Filtro'].str.contains('MECE|MAEN|RECH', na=False, regex=True, case=False)])
+        # Métricas cruzadas de Avisos — búsqueda exacta para evitar que METR ORAS infle METR
+        cant_tratados   = len(av_filt[av_filt['Status Filtro'] == 'METR'])
+        cant_sin_aprob  = len(av_filt[av_filt['Status Filtro'] == 'MEAB'])
+        cant_rechazados = len(av_filt[av_filt['Status Filtro'].isin(['MECE', 'MAEN', 'RECH'])])
         
         col_m2.metric("Avisos tratados Sin OM", cant_tratados)
         col_m3.metric("Avisos Sin Aprovacion", cant_sin_aprob)
@@ -679,7 +611,7 @@ with tab_om:
             with col_g_om1:
                 st.markdown("**OMs por Prioridad**")
                 df_prio_om = om_filt.groupby('Prioridad').size().reset_index(name='Cantidad')
-                fig_donut_om = px.pie(df_prio_om, values='Cantidad', names='Prioridad', hole=0.65, color_discrete_sequence=qlik_colors)
+                fig_donut_om = px.pie(df_prio_om, values='Cantidad', names='Prioridad', hole=0.65, color_discrete_sequence=QLIK_COLORS)
                 fig_donut_om.update_traces(textposition='inside', textinfo='value')
                 fig_donut_om.update_layout(margin=dict(t=10, b=10, l=10, r=10), showlegend=True, paper_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_donut_om, use_container_width=True)
@@ -687,7 +619,7 @@ with tab_om:
             with col_g_om2:
                 st.markdown("**OMs por Status y Programador**")
                 df_om_bar = df_grouped_om.groupby(['Programador', 'Status Agrupado']).size().reset_index(name='Cantidad')
-                fig_bar_om = px.bar(df_om_bar, x='Programador', y='Cantidad', color='Status Agrupado', color_discrete_sequence=qlik_colors)
+                fig_bar_om = px.bar(df_om_bar, x='Programador', y='Cantidad', color='Status Agrupado', color_discrete_sequence=QLIK_COLORS)
                 fig_bar_om.update_layout(margin=dict(t=10, b=10, l=10, r=10), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_bar_om, use_container_width=True)
                 
@@ -707,20 +639,18 @@ with tab_om:
 # TAB 1: RESUMEN EJECUTIVO
 # ---------------------------------------------------------------------
 with tab1:
-    qlik_colors = ['#006580', '#A3334E', '#E5CDA8', '#7AB3A2', '#4C2C69']
-    
     # --- SECCIÓN 1: RESUMEN DE AVISOS ---
     st.subheader("📋 Resumen de Avisos por Programador")
     if not av_filt.empty:
         col_m1, col_m2, col_m3, col_m4, col_m5, col_m6 = st.columns(6)
         col_m1.metric("TOTAL AVISOS", len(av_filt))
         
-        # Métricas cruzadas de OMs
-        cant_crea = len(om_filt[om_filt['Status de usuario'].str.contains('CREA', na=False, case=False)])
-        cant_pprg = len(om_filt[om_filt['Status de usuario'].str.contains('PPRG', na=False, case=False)])
-        cant_ppln = len(om_filt[om_filt['Status de usuario'].str.contains('PPLN', na=False, case=False)])
-        cant_plan = len(om_filt[om_filt['Status de usuario'].str.contains('PLAN', na=False, case=False)])
-        cant_rete = len(om_filt[om_filt['Status de usuario'].str.contains('RETE', na=False, case=False)])
+        # Métricas cruzadas de OMs — búsqueda exacta por campo 'Status de usuario'
+        cant_crea = len(om_filt[om_filt['Status de usuario'].str.upper().str.contains('CREA', na=False)])
+        cant_pprg = len(om_filt[om_filt['Status de usuario'].str.upper().str.contains('PPRG', na=False)])
+        cant_ppln = len(om_filt[om_filt['Status de usuario'].str.upper().str.contains('PPLN', na=False)])
+        cant_plan = len(om_filt[om_filt['Status de usuario'].str.upper().str.contains('PLAN', na=False) & ~om_filt['Status de usuario'].str.upper().str.contains('PPLN', na=False)])
+        cant_rete = len(om_filt[om_filt['Status de usuario'].str.upper().str.contains('RETE', na=False)])
         
         col_m2.metric("CREA", cant_crea)
         col_m3.metric("PPRG", cant_pprg)
@@ -733,23 +663,28 @@ with tab1:
         # 1. Crear Tabla
         df_grouped_av = av_filt.copy()
         
-        # Mapeo según requerimiento del cliente
+        # Mapeo con etiquetas de negocio comprensibles (corrige status crudos SAP)
         def agrupar_av(s):
             s = str(s).upper()
-            if 'MEAB' in s: return 'Avisos Sin Aprovacion'
-            if 'METR' in s: return 'Avisos tratados Sin OM'
-            if 'RECH' in s or 'MECE' in s or 'MAEN' in s: return 'Avisos Rechazados'
-            return s
+            if 'METR ORAS' in s: return 'OM Pend. Planificación'
+            if 'METR' in s: return 'Aprobado Sin OM'
+            if 'MEAB' in s: return 'Pendiente Aprobación'
+            if 'RECH' in s or 'MECE' in s or 'MAEN' in s: return 'Rechazados/Cerrados'
+            if 'CREA' in s: return 'Creado'
+            if 'PPRG' in s: return 'Pre-programado'
+            if 'PPLN' in s: return 'Pre-planificado'
+            if 'PLAN' in s: return 'Planificado'
+            if 'RETE' in s: return 'Retenido'
+            return 'Otros'
             
         df_grouped_av['Status Renombrado'] = df_grouped_av['Status Filtro'].apply(agrupar_av)
         
         tabla_avisos_pivot = pd.crosstab(index=df_grouped_av['Programador'], columns=df_grouped_av['Status Renombrado'], margins=True, margins_name='TOTAL Avisos')
-        cols_deseadas = ['Avisos tratados Sin OM', 'Avisos Sin Aprovacion', 'Avisos Rechazados', 'TOTAL Avisos']
+        # Mostrar todas las columnas que existan en los datos + el total
+        cols_deseadas = ['Aprobado Sin OM', 'Pendiente Aprobación', 'OM Pend. Planificación', 'Rechazados/Cerrados', 'Creado', 'Pre-programado', 'Pre-planificado', 'Planificado', 'Retenido', 'Otros', 'TOTAL Avisos']
+        cols_presentes = [c for c in cols_deseadas if c in tabla_avisos_pivot.columns]
         
-        for col in cols_deseadas:
-            if col not in tabla_avisos_pivot.columns: tabla_avisos_pivot[col] = 0
-            
-        tabla_avisos_pivot = tabla_avisos_pivot[cols_deseadas].reset_index()
+        tabla_avisos_pivot = tabla_avisos_pivot[cols_presentes].reset_index()
         
         st.dataframe(tabla_avisos_pivot, use_container_width=True, hide_index=True)
         
@@ -761,7 +696,7 @@ with tab1:
             with col_g1:
                 st.markdown("**Avisos por Prioridad**")
                 df_prio = av_filt.groupby('Prioridad').size().reset_index(name='Cantidad')
-                fig_donut = px.pie(df_prio, values='Cantidad', names='Prioridad', hole=0.65, color_discrete_sequence=qlik_colors)
+                fig_donut = px.pie(df_prio, values='Cantidad', names='Prioridad', hole=0.65, color_discrete_sequence=QLIK_COLORS)
                 fig_donut.update_traces(textposition='inside', textinfo='value')
                 fig_donut.update_layout(margin=dict(t=10, b=10, l=10, r=10), showlegend=True, paper_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_donut, use_container_width=True)
@@ -822,6 +757,16 @@ with tab1:
 # TAB 2: DETALLE AVISOS Y OMs (CON GRÁFICOS)
 # ---------------------------------------------------------------------
 with tab2:
+    st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
+    col_f1, col_f2, col_f3, col_f4 = st.columns([1, 1, 1, 1])
+    t_plan = om_filt['Tota general (plan)'].sum()
+    t_real = om_filt['Costes tot.reales'].sum()
+    d_clp = t_plan - t_real  # Positivo = ahorro vs plan; Negativo = sobrecosto
+    col_f1.metric("COSTO PLANIFICADO", f"${t_plan:,.0f}".replace(',', '.'))
+    col_f2.metric("COSTO REAL", f"${t_real:,.0f}".replace(',', '.'))
+    col_f3.metric("DESVIACIÓN (CLP)", f"${d_clp:,.0f}".replace(',', '.'))
+    st.markdown("<hr style='margin-top: 25px; margin-bottom: 25px; border-top: 1px solid #E2E8F0;'>", unsafe_allow_html=True)
+    
     col_t2a, col_t2b = st.columns(2)
     
     with col_t2a:
@@ -830,7 +775,7 @@ with tab2:
             tabla_avisos = av_filt.groupby(['Status Filtro', 'Prioridad']).size().reset_index(name='Cantidad')
             st.dataframe(tabla_avisos, use_container_width=True, hide_index=True)
             
-            fig_av = px.bar(tabla_avisos, x='Status Filtro', y='Cantidad', color='Prioridad', barmode='group', text='Cantidad', color_discrete_sequence=qlik_colors)
+            fig_av = px.bar(tabla_avisos, x='Status Filtro', y='Cantidad', color='Prioridad', barmode='group', text='Cantidad', color_discrete_sequence=QLIK_COLORS)
             fig_av.update_traces(textposition='outside', hovertemplate="<b>Status:</b> %{x}<br><b>Cantidad:</b> %{y}<extra></extra>")
             fig_av.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
             st.plotly_chart(fig_av, use_container_width=True)
@@ -839,11 +784,18 @@ with tab2:
     with col_t2b:
         st.subheader("Desglose de OMs y Costos")
         if not om_filt.empty:
-            tabla_oms = om_filt.groupby(['Prioridad', 'Status de usuario']).agg(Cantidad=('Orden', 'count'), Costo_Plan=('Tota general (plan)', 'sum'), Costo_Real=('Costes tot.reales', 'sum')).reset_index()
+            tabla_oms = om_filt.groupby(['Status de usuario', 'Prioridad']).agg(Cantidad=('Orden', 'count'), Costo_Plan=('Tota general (plan)', 'sum'), Costo_Real=('Costes tot.reales', 'sum')).reset_index()
             st.dataframe(tabla_oms.style.format({'Costo_Plan': '${:,.0f}', 'Costo_Real': '${:,.0f}'}), use_container_width=True, hide_index=True)
             
-            fig_om = px.bar(tabla_oms, x='Prioridad', y='Costo_Plan', color='Status de usuario', title='Costo Plan ($)', custom_data=['Cantidad'], color_discrete_sequence=qlik_colors)
-            fig_om.update_traces(hovertemplate="<b>Prioridad:</b> %{x}<br><b>Costo Plan:</b> $%{y:,.0f}<br><b>OMs:</b> %{customdata[0]}<extra></extra>")
+            # Gráfico comparativo Plan vs Real por Prioridad (corrige: antes solo mostraba Plan)
+            tabla_oms_melt = tabla_oms.groupby('Prioridad').agg(Costo_Plan=('Costo_Plan','sum'), Costo_Real=('Costo_Real','sum')).reset_index()
+            tabla_oms_melt = tabla_oms_melt.melt(id_vars='Prioridad', value_vars=['Costo_Plan', 'Costo_Real'], var_name='Tipo', value_name='Monto')
+            tabla_oms_melt['Tipo'] = tabla_oms_melt['Tipo'].map({'Costo_Plan': 'Planificado', 'Costo_Real': 'Real'})
+            fig_om = px.bar(tabla_oms_melt, x='Prioridad', y='Monto', color='Tipo', barmode='group',
+                            title='Costo Planificado vs Real por Prioridad',
+                            color_discrete_map={'Planificado': '#006580', 'Real': '#A3334E'},
+                            text='Monto')
+            fig_om.update_traces(texttemplate='$%{text:,.0f}', textposition='outside')
             fig_om.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
             st.plotly_chart(fig_om, use_container_width=True)
         else: st.info("No hay OMs para mostrar.")
@@ -863,12 +815,30 @@ with tab3:
         
         df_t = av_time.groupby(['Status Filtro', 'Año', 'Mes_Num', 'Mes']).size().reset_index(name='Cantidad').sort_values(by=['Año', 'Mes_Num'])
         orden_meses = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic"]
-        titulos = {'MEAB': 'AVISOS PENDIENTES APROBACIÓN (MEAB)', 'METR': 'AVISOS APROBADOS PENDIENTES OM (METR)', 'METR ORAS': 'OM PENDIENTE PLANIFICACIÓN (METR ORAS)'}
+        titulos = {
+            'MEAB':      'PENDIENTE APROBACIÓN (MEAB)',
+            'METR':      'APROBADOS PENDIENTES OM (METR)',
+            'METR ORAS': 'OM PENDIENTE PLANIFICACIÓN (METR ORAS)',
+            'CREA':      'CREADOS (CREA)',
+            'PPRG':      'PRE-PROGRAMADOS (PPRG)',
+            'PPLN':      'PRE-PLANIFICADOS (PPLN)',
+            'PLAN':      'PLANIFICADOS (PLAN)',
+            'RETE':      'RETENIDOS (RETE)',
+            'RECH':      'RECHAZADOS (RECH)',
+        }
+        # Selector de status a graficar (por defecto los 3 principales)
+        status_disponibles = [s for s in titulos.keys() if s in df_t['Status Filtro'].unique()]
+        status_sel_time = st.multiselect(
+            "Status a visualizar:",
+            options=status_disponibles,
+            default=[s for s in ['MEAB', 'METR', 'METR ORAS'] if s in status_disponibles],
+            key="time_status_sel"
+        )
         
-        for st_val in ['MEAB', 'METR', 'METR ORAS']:
+        for st_val in status_sel_time:
             df_plot = df_t[df_t['Status Filtro'] == st_val]
             if not df_plot.empty:
-                st.markdown(f"**{titulos[st_val]}**")
+                st.markdown(f"**{titulos.get(st_val, st_val)}**")
                 fig_time = px.bar(df_plot, x='Mes', y='Cantidad', color='Año', barmode='group', text='Cantidad', category_orders={"Mes": orden_meses}, color_discrete_sequence=['#006580', '#A3334E', '#E5CDA8'])
                 fig_time.update_traces(textposition='outside')
                 fig_time.update_layout(xaxis_title="", yaxis_title="", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', height=300)
@@ -999,7 +969,7 @@ with tab4:
             Cant_OMs=('Orden', 'count')
         ).reset_index()
         
-        df_eficiencia['Desviacion_CLP'] = df_eficiencia['Real'] - df_eficiencia['Planificado']
+        df_eficiencia['Desviacion_CLP'] = df_eficiencia['Planificado'] - df_eficiencia['Real']  # Positivo = ahorro
         
         fig_costos = px.bar(
             df_eficiencia.melt(id_vars='Programador', value_vars=['Planificado', 'Real']), 
@@ -1042,4 +1012,3 @@ with tab5:
         st.dataframe(om_filt[cols_om_base + cols_om_extra], use_container_width=True, hide_index=True)
     else:
         st.info("No hay datos de OMs para mostrar.")
-
