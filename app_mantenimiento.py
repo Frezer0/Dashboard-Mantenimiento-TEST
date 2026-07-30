@@ -4,7 +4,7 @@ import re
 import plotly.express as px
 import os
 from datetime import datetime
-
+import pytz
 import sqlalchemy  # DB Sql Progress
 from sqlalchemy import text # para ejecutar SQL directo
 
@@ -320,7 +320,9 @@ def modal_actualizar():
                 st.cache_data.clear()
                 # Guardar quién hizo la actualización y cuándo
                 st.session_state['ultima_actualizacion_usuario'] = st.session_state.usuario_activo
-                st.session_state['ultima_actualizacion_hora'] = datetime.today().strftime('%d-%m-%Y %H:%M')
+                #st.session_state['ultima_actualizacion_hora'] = datetime.today().strftime('%d-%m-%Y %H:%M')
+                chile_tz = pytz.timezone('America/Santiago')
+                st.session_state['ultima_actualizacion_hora'] = datetime.now(chile_tz).strftime('%d-%m-%Y %H:%M')
                 st.success("¡Datos actualizados en la nube con éxito!")
                 st.rerun()
         except Exception as e:
@@ -364,7 +366,8 @@ st.markdown("<h1 style='color: #333; font-weight: 300; margin-bottom: 0px; paddi
 # Badge de usuario + usuarios conectados + última actualización
 _label_usuarios = "Usuarios Conectados" if len(usuarios_en_linea) > 1 else "Usuario Conectado"
 _nombres_linea = " · ".join(usuarios_en_linea) if usuarios_en_linea else st.session_state.usuario_activo
-_hora_act = st.session_state.get('ultima_actualizacion_hora', datetime.today().strftime('%d-%m-%Y %H:%M'))
+chile_tz = pytz.timezone('America/Santiago')
+_hora_act = st.session_state.get('ultima_actualizacion_hora', datetime.now(chile_tz).strftime('%d-%m-%Y %H:%M'))
 _quien_act = st.session_state.get('ultima_actualizacion_usuario', '')
 _uploader_html = f'<span style="color:#CBD5E1; margin: 0 5px;">·</span><span style="color:#64748B; font-weight:500;">{_quien_act}</span>' if _quien_act else ''
 
