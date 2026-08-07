@@ -320,56 +320,82 @@ def extraer_status_objetivo(status_str):
 # DB  
 # ===================================================================== 
 
-@st.dialog("🔄 ActualizaR Base de Datos")
+@st.dialog("🔄 Actualizar Base de Datos")
 def modal_actualizar():
     st.write("Cargue los reportes base (IW28 e IW38). Se actualizarán para todos los usuarios en tiempo real.")
     arch_avisos = st.file_uploader("Avisos IW28 (.xlsx)", type=["xlsx"])
     arch_oms = st.file_uploader("OMs IW38 (.xlsx)", type=["xlsx"])
     
     if st.button("Guardar en Base de Datos", use_container_width=True):
-        try:
-            engine = sqlalchemy.create_engine(DATABASE_URL)
-            act = False
+        if not arch_avisos and not arch_oms:
+            st.warning("Debes subir al menos un archivo.")
+            return
             
-            if arch_avisos:
-                df_av = pd.read_excel(arch_avisos)
-                # Guardamos directamente en la tabla 'avisos' de PostgreSQL (reemplazando la anterior)
-                df_av.to_sql('avisos', engine, if_exists='replace', index=False)
-                act = True
-                
-            if arch_oms:
-                df_om = pd.read_excel(arch_oms)
-                # Guardamos directamente en la tabla 'oms' de PostgreSQL (reemplazando la anterior)
-                df_om.to_sql('oms', engine, if_exists='replace', index=False)
-                act = True
-                
-            if act:
-                st.cache_data.clear()
-                # Guardar quién hizo la actualización y cuándo en PostgreSQL
-                chile_tz = pytz.timezone('America/Santiago')
-                hora_str = datetime.now(chile_tz).strftime('%d-%m-%Y %H:%M')
-                
-                with engine.connect() as conn:
-                    conn.execute(text("""
-                        CREATE TABLE IF NOT EXISTS meta_actualizacion (
-                            id INT PRIMARY KEY,
-                            usuario VARCHAR(100),
-                            hora VARCHAR(100)
-                        )
-                    """))
-                    conn.execute(text("""
-                        INSERT INTO meta_actualizacion (id, usuario, hora) 
-                        VALUES (1, :usr, :hr)
-                        ON CONFLICT (id) 
-                        DO UPDATE SET usuario = :usr, hora = :hr
-                    """), {"usr": st.session_state.usuario_activo, "hr": hora_str})
-                    conn.commit()
+        progress_bar = st.progress(0, text="Iniciando carga...")
+        try:
+            act = False
+            progress_bar.progress(20, text="Procesando archivos...")
+            
+            # Usar SQL si hay DATABASE_URL configurada
+            if DATABASE_URL:
+                engine = sqlalchemy.create_engine(DATABASE_URL)
+                if arch_avisos:
+                    df_av = pd.read_excel(arch_avisos)
+                    progress_bar.progress(50, text="Subiendo Avisos a la nube...")
+                    df_av.to_sql('avisos', engine, if_exists='replace', index=False)
+                    act = True
                     
-                st.success("¡Datos actualizados en la nube con éxito!")
+                if arch_oms:
+                    df_om = pd.read_excel(arch_oms)
+                    progress_bar.progress(80, text="Subiendo OMs a la nube...")
+                    df_om.to_sql('oms', engine, if_exists='replace', index=False)
+                    act = True
+                    
+                if act:
+                    st.cache_data.clear()
+                    # Guardar quién hizo la actualización y cuándo en PostgreSQL
+                    chile_tz = pytz.timezone('America/Santiago')
+                    hora_str = datetime.now(chile_tz).strftime('%d-%m-%Y %H:%M')
+                    
+                    with engine.connect() as conn:
+                        conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS meta_actualizacion (
+                                id INT PRIMARY KEY,
+                                usuario VARCHAR(100),
+                                hora VARCHAR(100)
+                            )
+                        """))
+                        conn.execute(text("""
+                            INSERT INTO meta_actualizacion (id, usuario, hora) 
+                            VALUES (1, :usr, :hr)
+                            ON CONFLICT (id) 
+                            DO UPDATE SET usuario = :usr, hora = :hr
+                        """), {"usr": st.session_state.usuario_activo, "hr": hora_str})
+                        conn.commit()
+                        
+            # Si no hay DB configurada, guardar como Excel local (Modo de prueba local)
+            else:
+                if arch_avisos:
+                    df_av = pd.read_excel(arch_avisos)
+                    progress_bar.progress(50, text="Guardando Avisos localmente...")
+                    df_av.to_excel('Avisos IW28.xlsx', index=False)
+                    act = True
+                    
+                if arch_oms:
+                    df_om = pd.read_excel(arch_oms)
+                    progress_bar.progress(80, text="Guardando OMs localmente...")
+                    df_om.to_excel('OMs IW38.xlsx', index=False)
+                    act = True
+
+            if act:
+                progress_bar.progress(100, text="¡Carga completada con éxito!")
+                st.cache_data.clear()
                 time.sleep(1.0)
                 st.rerun()
+                
         except Exception as e:
-            st.error(f"Error al conectar con la base de datos: {e}")
+            progress_bar.empty()
+            st.error(f"Error durante la actualización: {e}")
 
 # =====================================================================
 # SISTEMA DE PRESENCIA EN DB (INVISIBLE)
@@ -530,6 +556,9 @@ with st.sidebar:
 
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
     if st.button("🔒  Cerrar Sesión", use_container_width=True):
+        # Limpiar variables de la URL para que no inicie sesión automáticamente de nuevo
+        st.query_params.clear()
+        
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.rerun()
@@ -1013,14 +1042,14 @@ with tab2:
     om_esrv = len(om_filt[om_filt['Status de usuario'].astype(str).str.contains('ESRV', case=False, na=False)]) if not om_filt.empty and 'Status de usuario' in om_filt.columns else 0
     om_emat = len(om_filt[om_filt['Status de usuario'].astype(str).str.contains('EMAT', case=False, na=False)]) if not om_filt.empty and 'Status de usuario' in om_filt.columns else 0
 
-    # PROGRAMADOR ESTRELLA (Global - No afectado por el filtro de programador individual)
-    if not oms_df.empty and 'Programador' in oms_df.columns:
-        prog_counts = oms_df['Programador'].value_counts()
+    # PROGRAMADOR ESTRELLA (Dinámico - Afectado por los filtros)
+    if not om_filt.empty and 'Programador' in om_filt.columns:
+        prog_counts = om_filt['Programador'].value_counts()
         top_prog = prog_counts.idxmax() if not prog_counts.empty else "N/A"
         top_prog_oms = prog_counts.max() if not prog_counts.empty else 0
         
         if top_prog != "N/A":
-            df_top = oms_df[oms_df['Programador'] == top_prog]
+            df_top = om_filt[om_filt['Programador'] == top_prog]
             top_prog_costo = df_top['Costes tot.reales'].sum() if 'Costes tot.reales' in df_top.columns else 0
             top_prog_lib = len(df_top[df_top['Status de usuario'].astype(str).str.contains('LIB', case=False, na=False)]) if 'Status de usuario' in df_top.columns else 0
             top_prog_abie = len(df_top[df_top['Status de usuario'].astype(str).str.contains('ABIE', case=False, na=False)]) if 'Status de usuario' in df_top.columns else 0
@@ -1203,42 +1232,45 @@ with tab4:
                 fecha_fin = st.date_input("📅 Hasta", value=f_max, min_value=f_min, max_value=f_max, key="carga_hasta")
             df_carga = df_carga[(df_carga['Fecha'] >= fecha_inicio) & (df_carga['Fecha'] <= fecha_fin)]
 
-        # Tabla resumen limpia: solo total OMs
-        df_resumen_carga = df_carga.groupby('Programador').agg(
-            Total_OMs=('Orden', 'count')
-        ).reset_index()
-        df_resumen_carga.rename(columns={'Total_OMs': 'Total OMs'}, inplace=True)
-        
-        # Fila de total
-        total_carga = pd.DataFrame({
-            'Programador': ['Total general'],
-            'Total OMs': [int(df_resumen_carga['Total OMs'].sum())]
-        })
-        st.dataframe(
-            pd.concat([df_resumen_carga, total_carga], ignore_index=True),
-            use_container_width=True, hide_index=True
-        )
-
-        # Gráfico único de barras por semana
-        df_agg_sem = df_carga.groupby(['Semana_Num', 'Semana', 'Programador']).size().reset_index(name='OMs Creadas')
-        df_agg_sem = df_agg_sem.sort_values('Semana_Num')
-        colores_prog = ['#006580', '#A3334E', '#E5CDA8', '#7AB3A2', '#4C2C69']
-
-        fig_carga = px.bar(
-            df_agg_sem, x='Semana', y='OMs Creadas', color='Programador',
-            barmode='group', text='OMs Creadas',
-            color_discrete_sequence=colores_prog,
-            labels={'Semana': 'Semana del Año', 'OMs Creadas': 'Nº OMs'}
-        )
-        fig_carga.update_traces(textposition='outside', hovertemplate="<b>%{x}</b><br><b>Programador:</b> %{data.name}<br><b>Cantidad:</b> %{y}<extra></extra>")
-        fig_carga.update_layout(
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            height=420,
-            margin=dict(t=30, b=10, l=10, r=10),
-            xaxis_title=None
-        )
-        st.plotly_chart(fig_carga, use_container_width=True)
+        if df_carga.empty:
+            st.warning("No hay OMs creadas en el rango de fechas seleccionado.")
+        else:
+            # Tabla resumen limpia: solo total OMs
+            df_resumen_carga = df_carga.groupby('Programador').agg(
+                Total_OMs=('Orden', 'count')
+            ).reset_index()
+            df_resumen_carga.rename(columns={'Total_OMs': 'Total OMs'}, inplace=True)
+            
+            # Fila de total
+            total_carga = pd.DataFrame({
+                'Programador': ['Total general'],
+                'Total OMs': [int(df_resumen_carga['Total OMs'].sum())]
+            })
+            st.dataframe(
+                pd.concat([df_resumen_carga, total_carga], ignore_index=True),
+                use_container_width=True, hide_index=True
+            )
+    
+            # Gráfico único de barras por semana
+            df_agg_sem = df_carga.groupby(['Semana_Num', 'Semana', 'Programador']).size().reset_index(name='OMs Creadas')
+            df_agg_sem = df_agg_sem.sort_values('Semana_Num')
+            colores_prog = ['#006580', '#A3334E', '#E5CDA8', '#7AB3A2', '#4C2C69']
+    
+            fig_carga = px.bar(
+                df_agg_sem, x='Semana', y='OMs Creadas', color='Programador',
+                barmode='group', text='OMs Creadas',
+                color_discrete_sequence=colores_prog,
+                labels={'Semana': 'Semana del Año', 'OMs Creadas': 'Nº OMs'}
+            )
+            fig_carga.update_traces(textposition='outside', hovertemplate="<b>%{x}</b><br><b>Programador:</b> %{data.name}<br><b>Cantidad:</b> %{y}<extra></extra>")
+            fig_carga.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                height=420,
+                margin=dict(t=30, b=10, l=10, r=10),
+                xaxis_title=None
+            )
+            st.plotly_chart(fig_carga, use_container_width=True)
     else:
         st.info("No hay datos de carga de trabajo disponibles para el período seleccionado.")
 
@@ -1316,11 +1348,21 @@ with tab5:
     st.markdown("---")
     st.subheader("Matriz Interactiva (OMs)")
     if not om_filt.empty:
-        # Columnas base + columnas opcionales (Equipo, Texto breve, Denom. objeto técnico)
-        cols_om_base = ['Orden', 'ZONA', 'Programador', 'Status de usuario', 'Prioridad',
-                        'Denominación de la ubicación técnica', 'Tota general (plan)', 'Costes tot.reales']
-        cols_om_extra = [c for c in ['Equipo', 'Texto breve', 'Denominación de objeto técnico']
-                         if c in om_filt.columns]
-        st.dataframe(om_filt[cols_om_base + cols_om_extra], use_container_width=True, hide_index=True)
+        cols_om_strict = [
+            'Prioridad', 
+            'Denominación de la ubicación técnica', 
+            'Equipo', 
+            'Denominación del objeto técnico', 
+            'Denominación de objeto técnico', # Fallback por si en el excel dice "de" en lugar de "del"
+            'Texto breve', 
+            'Tota general (plan)', 
+            'Costes tot.reales',
+            'Plan de Verificación',
+            'Verificación Manual'
+        ]
+        cols_to_show = [c for c in cols_om_strict if c in om_filt.columns]
+        # Remover duplicados manteniendo el orden
+        cols_to_show = list(dict.fromkeys(cols_to_show))
+        st.dataframe(om_filt[cols_to_show], use_container_width=True, hide_index=True)
     else:
         st.info("No hay datos de OMs para mostrar.")
