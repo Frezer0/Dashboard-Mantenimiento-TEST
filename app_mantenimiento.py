@@ -2,13 +2,21 @@ import streamlit as st
 import pandas as pd
 import re
 import plotly.express as px
+import plotly.graph_objects as go
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 import sqlalchemy  # DB Sql Progress
+import time
 from sqlalchemy import text # para ejecutar SQL directo
-
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Si existe el archivo secrets de Streamlit, sobrescribe la variable de entorno
+try:
+    if "DATABASE_URL" in st.secrets:
+        DATABASE_URL = st.secrets["DATABASE_URL"]
+except Exception:
+    pass
 
 # =====================================================================
 # =====================================================================
@@ -23,6 +31,49 @@ MAPEO_PRIORIDAD_OM = {
     7.0: '3 Media',
     8.0: '4 Baja',
 }
+
+# Mapeo de Estatus a Descripciones (para tooltips)
+DICCIONARIO_STATUS = {
+    # --- STATUS AVISOS ---
+    'MAEN': 'Clase de aviso modificado',
+    'MEAB': 'Mensaje Abierto',
+    'METR': 'Mensaje Tratamiento',
+    'ORAS': 'Orden Asignada',
+    'MECE': 'Mensaje Cerrado',
+
+    # --- ORIGEN/EMISOR DE AVISOS ---
+    'MANT': 'Aviso emitido por mantenimiento',
+    'PROD': 'Aviso emitido por produccion',
+    'ADMI': 'Aviso emitido por administracion',
+    'PERS': 'Aviso emitido por personal',
+    'PRED': 'Aviso emitido por Mant. Predic.',
+    'PREV': 'Aviso emitido por Prev. Riesgos',
+    'INGE': 'Aviso emitido por ingeneria',
+    'AMBI': 'Aviso emitido por M. Ambiente',
+    'IDOC': 'Generacion de IDOC',
+
+    # --- APROBACIONES DE AVISOS ---
+    'APRO': 'Aprobado',
+    'MIRQ': 'Se requiere mas inforamcion',
+
+    # --- STATUS DE LAS ORDENES DE MANTENIMIENTO (OMs) ---
+    'CREA': 'Creado',
+    'PPLN': 'Pendiente de planificacion',
+    'PLAN': 'Planificado',
+    'PPRG': 'Pendiente de programacion',
+    'PROG': 'Programado',
+    'RECH': 'Rechazado',
+    'RETE': 'Retener',
+
+    # --- STATUS COMBINADOS / CONDICIONANTES ---
+    'EMAT': 'Esperando Materiales',
+    'ESRV': 'Esperando servicios',
+    'RDET': 'Reprogramar fecha de la detencion'
+}
+
+def obtener_descripcion_status(status_str):
+    if pd.isna(status_str) or not isinstance(status_str, str): return ""
+    return " - ".join([DICCIONARIO_STATUS.get(p, p) for p in status_str.upper().split()])
 
 # Orden canónico para el filtro de prioridad
 ORDEN_PRIORIDADES = ['1 Muy Alta', '2 Alta', '3 Media', '4 Baja', 'Programable', 'Urgencia', 'Emergencia']
@@ -40,11 +91,13 @@ def sort_prioridades(opciones: list) -> list:
 @st.cache_data(ttl=60)
 def cargar_datos():
     try:
-        engine = sqlalchemy.create_engine(DATABASE_URL)
-        avisos_df = pd.read_sql("SELECT * FROM avisos", engine)
-        oms_df = pd.read_sql("SELECT * FROM oms", engine)
-        #avisos_df = pd.read_excel('Avisos IW28.xlsx')
-        #oms_df = pd.read_excel('OMs IW38.xlsx')
+        if DATABASE_URL:
+            engine = sqlalchemy.create_engine(DATABASE_URL)
+            avisos_df = pd.read_sql("SELECT * FROM avisos", engine)
+            oms_df = pd.read_sql("SELECT * FROM oms", engine)
+        else:
+            avisos_df = pd.read_excel('Avisos IW28.xlsx')
+            oms_df = pd.read_excel('OMs IW38.xlsx')
         
         columnas_clave = [
             'Centro emplazamiento', 'Grupo planificación', 'Denominación de la ubicación técnica', 
@@ -77,6 +130,11 @@ st.markdown(f"<style>{css_content}</style>", unsafe_allow_html=True)
 # =====================================================================
 if "usuario_activo" not in st.session_state:
     st.session_state.usuario_activo = None
+
+# Recuperar el usuario desde los parámetros de la URL si existe
+url_user = st.query_params.get("user")
+if url_user and st.session_state.usuario_activo is None:
+    st.session_state.usuario_activo = url_user
 
 # Pantalla de Login Premium
 if st.session_state.usuario_activo is None:
@@ -182,6 +240,8 @@ if st.session_state.usuario_activo is None:
             if btn_ingresar:
                 if nombre_input.strip():
                     st.session_state.usuario_activo = nombre_input.strip()
+                    # Guardamos el usuario en la URL para que resista el F5
+                    st.query_params["user"] = nombre_input.strip()
                     st.rerun()
                 else:
                     st.error("⚠️ Por favor, ingresa tu nombre para continuar.")
@@ -197,40 +257,7 @@ if st.session_state.usuario_activo is None:
 
 
     
-# =====================================================================
-# SISTEMA DE PRESENCIA (QUIÉN ESTÁ EN LÍNEA)
-# =====================================================================
-if st.session_state.usuario_activo:
-    try:
-        engine = sqlalchemy.create_engine(DATABASE_URL)
-        with engine.connect() as conn:
-            # 1. Crear tabla si no existe
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS usuarios_activos (
-                    nombre VARCHAR(100) PRIMARY KEY,
-                    ultimo_acceso TIMESTAMP
-                )
-            """))
-            
-            # 2. Actualizar el "último acceso" del usuario actual (Upsert)
-            conn.execute(text("""
-                INSERT INTO usuarios_activos (nombre, ultimo_acceso) 
-                VALUES (:usr, CURRENT_TIMESTAMP)
-                ON CONFLICT (nombre) 
-                DO UPDATE SET ultimo_acceso = CURRENT_TIMESTAMP
-            """), {"usr": st.session_state.usuario_activo})
-            
-            # 3. Leer quiénes han estado activos en los últimos 5 minutos
-            result = conn.execute(text("""
-                SELECT nombre FROM usuarios_activos 
-                WHERE ultimo_acceso >= NOW() - INTERVAL '5 minutes'
-            """))
-            usuarios_en_linea = [row[0] for row in result]
-            conn.commit() # Guardamos los cambios
-            
-    except Exception as e:
-        usuarios_en_linea = [st.session_state.usuario_activo]
-        # st.toast(f"Error en presencia: {e}") # Opcional por si quieres ver fallos
+# (Bloque de presencia duplicado eliminado)
 
 # =====================================================================
 # FUNCIONES BASE Y REGLAS DE NEGOCIO
@@ -293,7 +320,7 @@ def extraer_status_objetivo(status_str):
 # DB  
 # ===================================================================== 
 
-@st.dialog("🔄 Cargar Archivos SAP a la Nube")
+@st.dialog("🔄 ActualizaR Base de Datos")
 def modal_actualizar():
     st.write("Cargue los reportes base (IW28 e IW38). Se actualizarán para todos los usuarios en tiempo real.")
     arch_avisos = st.file_uploader("Avisos IW28 (.xlsx)", type=["xlsx"])
@@ -318,12 +345,28 @@ def modal_actualizar():
                 
             if act:
                 st.cache_data.clear()
-                # Guardar quién hizo la actualización y cuándo
-                st.session_state['ultima_actualizacion_usuario'] = st.session_state.usuario_activo
-                #st.session_state['ultima_actualizacion_hora'] = datetime.today().strftime('%d-%m-%Y %H:%M')
+                # Guardar quién hizo la actualización y cuándo en PostgreSQL
                 chile_tz = pytz.timezone('America/Santiago')
-                st.session_state['ultima_actualizacion_hora'] = datetime.now(chile_tz).strftime('%d-%m-%Y %H:%M')
+                hora_str = datetime.now(chile_tz).strftime('%d-%m-%Y %H:%M')
+                
+                with engine.connect() as conn:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS meta_actualizacion (
+                            id INT PRIMARY KEY,
+                            usuario VARCHAR(100),
+                            hora VARCHAR(100)
+                        )
+                    """))
+                    conn.execute(text("""
+                        INSERT INTO meta_actualizacion (id, usuario, hora) 
+                        VALUES (1, :usr, :hr)
+                        ON CONFLICT (id) 
+                        DO UPDATE SET usuario = :usr, hora = :hr
+                    """), {"usr": st.session_state.usuario_activo, "hr": hora_str})
+                    conn.commit()
+                    
                 st.success("¡Datos actualizados en la nube con éxito!")
+                time.sleep(1.0)
                 st.rerun()
         except Exception as e:
             st.error(f"Error al conectar con la base de datos: {e}")
@@ -334,27 +377,31 @@ def modal_actualizar():
 usuarios_en_linea = []
 if st.session_state.usuario_activo:
     try:
-        engine = sqlalchemy.create_engine(DATABASE_URL)
-        with engine.connect() as conn:
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS usuarios_activos (
-                    nombre VARCHAR(100) PRIMARY KEY,
-                    ultimo_acceso TIMESTAMP
-                )
-            """))
-            conn.execute(text("""
-                INSERT INTO usuarios_activos (nombre, ultimo_acceso) 
-                VALUES (:usr, CURRENT_TIMESTAMP)
-                ON CONFLICT (nombre) 
-                DO UPDATE SET ultimo_acceso = CURRENT_TIMESTAMP
-            """), {"usr": st.session_state.usuario_activo})
-            
-            result = conn.execute(text("""
-                SELECT nombre FROM usuarios_activos 
-                WHERE ultimo_acceso >= NOW() - INTERVAL '5 minutes'
-            """))
-            usuarios_en_linea = [row[0] for row in result]
-            conn.commit()
+        if DATABASE_URL:
+            engine = sqlalchemy.create_engine(DATABASE_URL)
+            with engine.connect() as conn:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS usuarios_activos (
+                        nombre VARCHAR(100) PRIMARY KEY,
+                        ultimo_acceso TIMESTAMP
+                    )
+                """))
+                conn.execute(text("""
+                    INSERT INTO usuarios_activos (nombre, ultimo_acceso) 
+                    VALUES (:usr, CURRENT_TIMESTAMP AT TIME ZONE 'UTC' AT TIME ZONE 'America/Santiago')
+                    ON CONFLICT (nombre) 
+                    DO UPDATE SET ultimo_acceso = CURRENT_TIMESTAMP AT TIME ZONE 'UTC' AT TIME ZONE 'America/Santiago'
+                """), {"usr": st.session_state.usuario_activo})
+                
+                result = conn.execute(text("""
+                    SELECT nombre FROM usuarios_activos 
+                    WHERE ultimo_acceso >= (NOW() AT TIME ZONE 'UTC' AT TIME ZONE 'America/Santiago') - INTERVAL '5 minutes'
+                """))
+                usuarios_en_linea = [row[0] for row in result]
+                conn.commit()
+        else:
+            # MOCK local para presencia
+            usuarios_en_linea = [st.session_state.usuario_activo]
     except Exception:
         usuarios_en_linea = [st.session_state.usuario_activo]
 
@@ -367,8 +414,21 @@ st.markdown("<h1 style='color: #333; font-weight: 300; margin-bottom: 0px; paddi
 _label_usuarios = "Usuarios Conectados" if len(usuarios_en_linea) > 1 else "Usuario Conectado"
 _nombres_linea = " · ".join(usuarios_en_linea) if usuarios_en_linea else st.session_state.usuario_activo
 chile_tz = pytz.timezone('America/Santiago')
-_hora_act = st.session_state.get('ultima_actualizacion_hora', datetime.now(chile_tz).strftime('%d-%m-%Y %H:%M'))
-_quien_act = st.session_state.get('ultima_actualizacion_usuario', '')
+_hora_act = "Pendiente de Carga"
+_quien_act = ''
+
+# Leer la última actualización desde PostgreSQL
+try:
+    if DATABASE_URL:
+        engine_meta = sqlalchemy.create_engine(DATABASE_URL)
+        with engine_meta.connect() as conn:
+            res = conn.execute(text("SELECT usuario, hora FROM meta_actualizacion WHERE id = 1")).fetchone()
+            if res:
+                _quien_act = res[0]
+                _hora_act = res[1]
+except Exception:
+    pass
+
 _uploader_html = f'<span style="color:#CBD5E1; margin: 0 5px;">·</span><span style="color:#64748B; font-weight:500;">{_quien_act}</span>' if _quien_act else ''
 
 st.markdown(f"""
@@ -427,7 +487,9 @@ if not oms_df.empty:
     # Mapear prioridad numérica (IW38) a texto unificado (igual que Avisos IW28)
     col_prio_om = next((c for c in oms_df.columns if c.lower() == 'prioridad'), None)
     if col_prio_om:
-        oms_df['Prioridad'] = pd.to_numeric(oms_df[col_prio_om], errors='coerce').map(MAPEO_PRIORIDAD_OM).fillna('Sin Prioridad')
+        # Intentar mapear códigos numéricos. Si falla (ej. ya viene como texto "1 Muy Alta" u otro código), preservar el valor original.
+        mapped_prio = pd.to_numeric(oms_df[col_prio_om], errors='coerce').map(MAPEO_PRIORIDAD_OM)
+        oms_df['Prioridad'] = mapped_prio.fillna(oms_df[col_prio_om]).replace(r'^\s*$', 'Sin Prioridad', regex=True).fillna('Sin Prioridad').astype(str)
     else:
         oms_df['Prioridad'] = 'Sin Prioridad'
 
@@ -524,13 +586,36 @@ av_temp = av_temp[av_temp['Programador'].isin(progs_sel)]
 om_temp = om_temp[om_temp['Programador'].isin(progs_sel)]
 
 with col_f3:
-    # Mostrar los status que realmente existen en los datos + fallback a la lista completa
-    status_base = ['METR ORAS', 'METR', 'MEAB', 'MECE', 'MAEN', 'RECH', 'CREA', 'PPRG', 'PPLN', 'PLAN', 'RETE', 'OTRO STATUS']
-    status_reales = list(av_temp['Status Filtro'].unique()) if not av_temp.empty else []
-    status_todos = sorted(set(status_base) | set(status_reales))
-    status_sel = filtro_gerencial("STATUS AVISO", status_todos, "fs")
+    # Lista base solicitada por el usuario
+    status_base = [
+        'CREA', 'PPLN', 'PLAN', 'PPRG', 'PROG', 'RECH', 'RETE', 
+        'EMAT', 'ESRV', 'RDET', 
+        'MAEN', 'MEAB', 'METR', 'ORAS', 'MECE', 
+        'OTRO STATUS'
+    ]
+    
+    # Extraer status reales de Avisos
+    status_reales_av = list(av_temp['Status Filtro'].unique()) if not av_temp.empty and 'Status Filtro' in av_temp.columns else []
+    
+    # Extraer status reales de OMs (que pueden venir combinados ej: "CREA EMAT")
+    status_reales_om = set()
+    if not om_temp.empty and 'Status de usuario' in om_temp.columns:
+        for s in om_temp['Status de usuario'].dropna():
+            status_reales_om.update(str(s).split())
+            
+    status_todos = sorted(set(status_base) | set(status_reales_av) | status_reales_om)
+    status_sel = filtro_gerencial("STATUS", status_todos, "fs")
 
-av_temp = av_temp[av_temp['Status Filtro'].isin(status_sel)]
+# Filtrar Avisos y OMs solo si hay una selección específica
+if status_sel and len(status_sel) < len(status_todos):
+    # Avisos es match exacto del status principal (4 letras)
+    if 'Status Filtro' in av_temp.columns:
+        av_temp = av_temp[av_temp['Status Filtro'].isin(status_sel)]
+    
+    # OMs es match de cualquiera de las palabras en "Status de usuario"
+    if not om_temp.empty and 'Status de usuario' in om_temp.columns:
+        patron_om = r'\b(?:' + '|'.join(status_sel) + r')\b'
+        om_temp = om_temp[om_temp['Status de usuario'].astype(str).str.contains(patron_om, case=False, regex=True)]
 
 with col_f4:
     # Prioridades unificadas (texto) dado el filtro acumulado
@@ -556,11 +641,10 @@ om_filt = om_temp[om_temp['Denominación de la ubicación técnica'].isin(lineas
 # =====================================================================
 # PESTAÑAS DE CONTENIDO (TODO INCLUIDO)
 # =====================================================================
-tab_om, tab1, tab4, tab3, tab2, tab5 = st.tabs([
-    "✅ Resumen OMs",
+tab1, tab_om, tab4, tab2, tab5 = st.tabs([
     "📊 Resumen Avisos", 
+    "✅ Resumen OMs",
     "👥 Carga de Trabajo", 
-    "📅 Línea de Tiempo", 
     "📋 Detalle Avisos y OMs", 
     "🗃️ Explorador de Datos"
 ])
@@ -569,42 +653,176 @@ tab_om, tab1, tab4, tab3, tab2, tab5 = st.tabs([
 # TAB OM: RESUMEN DE OMS
 # ---------------------------------------------------------------------
 with tab_om:
-    st.subheader("✅ Resumen de OMs por Programador")
     if not om_filt.empty:
-        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-        col_m1.metric("TOTAL OMs", len(om_filt))
+        # --- SECCION 0: KPIs Operativos (Formato Compacto) ---
+        # Calcular Espera de Servicios (ESRV) y Materiales (EMAT)
+        espera_servicios = om_filt['Status de usuario'].astype(str).str.contains(r'\bESRV\b', case=False, regex=True).sum() if 'Status de usuario' in om_filt.columns else 0
+        espera_materiales = om_filt['Status de usuario'].astype(str).str.contains(r'\bEMAT\b', case=False, regex=True).sum() if 'Status de usuario' in om_filt.columns else 0
         
-        # Métricas cruzadas de Avisos — búsqueda exacta para evitar que METR ORAS infle METR
-        cant_tratados   = len(av_filt[av_filt['Status Filtro'] == 'METR'])
-        cant_sin_aprob  = len(av_filt[av_filt['Status Filtro'] == 'MEAB'])
-        cant_rechazados = len(av_filt[av_filt['Status Filtro'].isin(['MECE', 'MAEN', 'RECH'])])
+        # Calcular Abiertas (ABIE) y Liberadas (LIB) por separado
+        if 'Status del sistema' in om_filt.columns:
+            oms_abiertas = om_filt['Status del sistema'].astype(str).str.contains(r'ABIE', case=False, regex=True).sum()
+            oms_liberadas = om_filt['Status del sistema'].astype(str).str.contains(r'LIB', case=False, regex=True).sum()
+        else:
+            oms_abiertas = om_filt['Status de usuario'].astype(str).str.contains(r'ABIE', case=False, regex=True).sum() if 'Status de usuario' in om_filt.columns else 0
+            oms_liberadas = om_filt['Status de usuario'].astype(str).str.contains(r'LIB', case=False, regex=True).sum() if 'Status de usuario' in om_filt.columns else 0
+            
+        st.markdown(f"""
+        <div style="display: flex; justify-content: center; gap: 16px; padding: 12px 16px; margin-top: 5px; margin-bottom: 25px; background-color: #F8FAFC; border-radius: 8px; border: 1px solid #E2E8F0; align-items: center; flex-wrap: wrap;">
+            <div style="font-size: 0.90rem; color: #475569;">
+                <span style="font-size: 1.0rem; margin-right: 4px;">🛠️</span>
+                <strong>Espera Servicios (ESRV):</strong> <span style="color: #0F172A; font-weight: 700; font-size: 1.0rem;">{f"{espera_servicios:,}".replace(',', '.')}</span>
+            </div>
+            <div style="width: 1px; height: 20px; background-color: #CBD5E1;"></div>
+            <div style="font-size: 0.90rem; color: #475569;">
+                <span style="font-size: 1.0rem; margin-right: 4px;">📦</span>
+                <strong>Espera Materiales (EMAT):</strong> <span style="color: #0F172A; font-weight: 700; font-size: 1.0rem;">{f"{espera_materiales:,}".replace(',', '.')}</span>
+            </div>
+            <div style="width: 1px; height: 20px; background-color: #CBD5E1;"></div>
+            <div style="font-size: 0.90rem; color: #475569;">
+                <span style="font-size: 1.0rem; margin-right: 4px;">📂</span>
+                <strong>Abiertas (ABIE):</strong> <span style="color: #0F172A; font-weight: 700; font-size: 1.0rem;">{f"{oms_abiertas:,}".replace(',', '.')}</span>
+            </div>
+            <div style="width: 1px; height: 20px; background-color: #CBD5E1;"></div>
+            <div style="font-size: 0.90rem; color: #475569;">
+                <span style="font-size: 1.0rem; margin-right: 4px;">🟢</span>
+                <strong>Liberadas (LIB):</strong> <span style="color: #0F172A; font-weight: 700; font-size: 1.0rem;">{f"{oms_liberadas:,}".replace(',', '.')}</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
         
-        col_m2.metric("Avisos tratados Sin OM", cant_tratados)
-        col_m3.metric("Avisos Sin Aprovacion", cant_sin_aprob)
-        col_m4.metric("Avisos Rechazados", cant_rechazados)
+        # --- SECCION 1: Dashboard Financiero ---
+        st.subheader("Desglose de OMs y Costos")
         
-        st.markdown("<hr style='margin-top: 0.5rem; margin-bottom: 1rem;'>", unsafe_allow_html=True)
+        # 1. KPIs Financieros
+        total_oms = len(om_filt)
+        total_plan = om_filt['Tota general (plan)'].sum()
+        total_real = om_filt['Costes tot.reales'].sum()
+        desviacion = total_real - total_plan # Variación de Costo: Positivo = Sobrecosto, Negativo = Ahorro
         
-        # 1. Crear Tabla Pivot
+        # Formateo correcto para que Streamlit detecte el signo negativo primero y lo ponga verde/abajo
+        if desviacion < 0:
+            delta_str = f"-${abs(desviacion):,.0f}".replace(',', '.')
+        else:
+            delta_str = f"${desviacion:,.0f}".replace(',', '.')
+        
+        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+        kpi1.metric("Total OMs", f"{total_oms:,}")
+        kpi2.metric("Pto. Planificado", f"${total_plan:,.0f}".replace(',', '.'))
+        kpi3.metric("Costo Real", f"${total_real:,.0f}".replace(',', '.'))
+        kpi4.metric(
+            "Desviación Global", 
+            f"${desviacion:,.0f}".replace(',', '.').replace('$-', '-$'),
+            delta=delta_str, 
+            delta_color="inverse"
+        )
+        
+
+        # 2. Nueva Vista Entendible: Gráfico de Barras y Tabla Agrupada
+        col_w1, col_w2 = st.columns([1, 1.2])
+        
+        with col_w1:
+            st.markdown("**Comparativa de Costos (Planificado vs Real)**")
+            # Barras Agrupadas por Prioridad
+            df_barras = om_filt.groupby('Prioridad').agg(
+                Planificado=('Tota general (plan)', 'sum'),
+                Real=('Costes tot.reales', 'sum')
+            ).reset_index()
+            
+            df_barras_melt = df_barras.melt(id_vars='Prioridad', value_vars=['Planificado', 'Real'], var_name='Tipo de Costo', value_name='Monto')
+            
+            # Crear texto con formato para el gráfico
+            df_barras_melt['Monto_str'] = df_barras_melt['Monto'].apply(lambda x: f"${x:,.0f}".replace(',', '.'))
+            
+            fig_barras = px.bar(
+                df_barras_melt, x='Prioridad', y='Monto', color='Tipo de Costo', barmode='group',
+                color_discrete_map={'Planificado': '#006580', 'Real': '#A3334E'}, text='Monto_str'
+            )
+            fig_barras.update_traces(
+                textposition='outside',
+                hovertemplate="<b>Prioridad:</b> %{x}<br><b>%{data.name}:</b> %{text}<extra></extra>"
+            )
+            fig_barras.update_layout(margin=dict(t=30, l=10, r=10, b=10), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01))
+            st.plotly_chart(fig_barras, use_container_width=True)
+                
+        with col_w2:
+            st.markdown("**Tabla Analítica de OMs (Por Prioridad y Status)**")
+            st.caption("Resumen completo de cantidades y presupuestos")
+            df_tabla = om_filt.groupby(['Prioridad', 'Status de usuario']).agg(
+                Cantidad=('Orden', 'count'),
+                Planificado=('Tota general (plan)', 'sum'),
+                Real=('Costes tot.reales', 'sum')
+            ).reset_index()
+            
+            # Desviación = Real - Plan (Ahorro en Negativo, Sobrecosto en Positivo)
+            df_tabla['Desviación'] = df_tabla['Real'] - df_tabla['Planificado']
+            
+            # MultiIndex para una vista limpia (Streamlit renderiza esto como agrupaciones)
+            df_tabla = df_tabla.set_index(['Prioridad', 'Status de usuario'])
+            
+            # Aplicamos formato de moneda a las columnas financieras (usando lambda para forzar puntos de miles)
+            formato = {
+                'Cantidad': lambda x: f"{x:,.0f}".replace(',', '.'),
+                'Planificado': lambda x: f"${x:,.0f}".replace(',', '.').replace('$-', '-$'),
+                'Real': lambda x: f"${x:,.0f}".replace(',', '.').replace('$-', '-$'),
+                'Desviación': lambda x: f"${x:,.0f}".replace(',', '.').replace('$-', '-$')
+            }
+            
+            def color_desviacion(val):
+                color = '#10B981' if val < 0 else '#A3334E' if val > 0 else 'black'
+                return f'color: {color}; font-weight: bold;'
+            
+            # Dar color a la columna Desviación y formatear
+            styler = df_tabla.style.map(color_desviacion, subset=['Desviación']).format(formato)
+            
+            st.dataframe(styler, use_container_width=True)
+            
+        st.markdown("<hr style='margin-top: 1rem; margin-bottom: 1rem;'>", unsafe_allow_html=True)
+        
+        # --- SECCION 2: Resumen por Programador ---
+        st.subheader("✅ Resumen de OMs por Programador")
+        
         df_grouped_om = om_filt.copy()
-        def agrupar_om(s):
-            s = str(s).upper()
-            if 'CREA' in s: return 'CREA'
-            if 'PPRG' in s: return 'PPRG'
-            if 'PPLN' in s: return 'PPLN'
-            if 'PLAN' in s: return 'PLAN'
-            if 'RETE' in s: return 'RETE'
-            return 'OTRO'
-        df_grouped_om['Status Agrupado'] = df_grouped_om['Status de usuario'].apply(agrupar_om)
         
-        tabla_oms_pivot = pd.crosstab(index=df_grouped_om['Programador'], columns=df_grouped_om['Status Agrupado'], margins=True, margins_name='TOTAL OMs')
+        # 1. Crear Tablas Pivot (Resumen General)
+        col_res1, col_res2 = st.columns([1, 1.5])
         
-        cols_deseadas_om = ['CREA', 'PPRG', 'PPLN', 'PLAN', 'RETE', 'TOTAL OMs']
-        for col in cols_deseadas_om:
-            if col not in tabla_oms_pivot.columns: tabla_oms_pivot[col] = 0
-        tabla_oms_pivot = tabla_oms_pivot[cols_deseadas_om].reset_index()
-        
-        st.dataframe(tabla_oms_pivot, use_container_width=True, hide_index=True)
+        with col_res1:
+            st.markdown("**Distribución por Prioridad**")
+            st.caption("Cantidad de OMs asignadas a cada programador según su prioridad.")
+            tabla_prio = pd.crosstab(index=df_grouped_om['Programador'], columns=df_grouped_om['Prioridad'], margins=True, margins_name='TOTAL')
+            st.dataframe(tabla_prio.reset_index(), use_container_width=True, hide_index=True)
+            
+        with col_res2:
+            st.markdown("**Distribución por Status**")
+            st.caption("Cantidad de OMs asignadas a cada programador según el estado actual.")
+            tabla_oms_pivot = pd.crosstab(index=df_grouped_om['Programador'], columns=df_grouped_om['Status de usuario'], margins=True, margins_name='TOTAL')
+            st.dataframe(tabla_oms_pivot.reset_index(), use_container_width=True, hide_index=True)
+
+        # 2. Detalle Completo (Solo si hay 1 programador seleccionado)
+        if df_grouped_om['Programador'].nunique() == 1:
+            prog_name = df_grouped_om['Programador'].iloc[0]
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.info(f"Mostrando detalle completo de OMs asignadas a: **{prog_name}**")
+            
+            cols_to_show = ['Orden', 'Prioridad', 'Status de usuario', 'Equipo', 'Denominación de la ubicación técnica', 'Tota general (plan)', 'Costes tot.reales']
+            cols_to_show = [c for c in cols_to_show if c in df_grouped_om.columns]
+            
+            df_detalle = df_grouped_om[cols_to_show].copy()
+            
+            # Formatear IDs para que Streamlit no los trate como números con comas
+            if 'Orden' in df_detalle.columns:
+                df_detalle['Orden'] = df_detalle['Orden'].astype(str).str.replace(r'\.0$', '', regex=True)
+            if 'Equipo' in df_detalle.columns:
+                df_detalle['Equipo'] = df_detalle['Equipo'].astype(str).str.replace(r'\.0$', '', regex=True)
+            
+            formato_detalle = {}
+            if 'Tota general (plan)' in df_detalle.columns:
+                formato_detalle['Tota general (plan)'] = lambda x: f"${x:,.0f}".replace(',', '.') if pd.notnull(x) else '$0'
+            if 'Costes tot.reales' in df_detalle.columns:
+                formato_detalle['Costes tot.reales'] = lambda x: f"${x:,.0f}".replace(',', '.') if pd.notnull(x) else '$0'
+                
+            st.dataframe(df_detalle.style.format(formato_detalle), use_container_width=True, hide_index=True)
         
         # 2. Botón Interruptor para Gráficos
         if st.toggle("📊 Mostrar gráficos de OMs", key="toggle_graf_om"):
@@ -615,14 +833,19 @@ with tab_om:
                 st.markdown("**OMs por Prioridad**")
                 df_prio_om = om_filt.groupby('Prioridad').size().reset_index(name='Cantidad')
                 fig_donut_om = px.pie(df_prio_om, values='Cantidad', names='Prioridad', hole=0.65, color_discrete_sequence=QLIK_COLORS)
-                fig_donut_om.update_traces(textposition='inside', textinfo='value')
+                fig_donut_om.update_traces(
+                    textposition='inside', textinfo='value',
+                    hovertemplate="<b>Prioridad:</b> %{label}<br><b>Cantidad:</b> %{value}<extra></extra>"
+                )
                 fig_donut_om.update_layout(margin=dict(t=10, b=10, l=10, r=10), showlegend=True, paper_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_donut_om, use_container_width=True)
                 
             with col_g_om2:
                 st.markdown("**OMs por Status y Programador**")
-                df_om_bar = df_grouped_om.groupby(['Programador', 'Status Agrupado']).size().reset_index(name='Cantidad')
-                fig_bar_om = px.bar(df_om_bar, x='Programador', y='Cantidad', color='Status Agrupado', color_discrete_sequence=QLIK_COLORS)
+                df_om_bar = df_grouped_om.groupby(['Programador', 'Status de usuario']).size().reset_index(name='Cantidad')
+                df_om_bar['Descripción'] = df_om_bar['Status de usuario'].apply(obtener_descripcion_status)
+                fig_bar_om = px.bar(df_om_bar, x='Programador', y='Cantidad', color='Status de usuario', hover_data={'Descripción': True}, color_discrete_sequence=QLIK_COLORS)
+                fig_bar_om.update_traces(hovertemplate="<b>Programador:</b> %{x}<br><b>Status:</b> %{data.name}<br><b>Descripción:</b> %{customdata[0]}<br><b>Cantidad:</b> %{y}<extra></extra>")
                 fig_bar_om.update_layout(margin=dict(t=10, b=10, l=10, r=10), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_bar_om, use_container_width=True)
                 
@@ -630,11 +853,15 @@ with tab_om:
                 st.markdown("**Total OMs por Centro de Emplazamiento**")
                 df_centro = om_filt.groupby('ZONA').size().reset_index(name='Total OMs')
                 fig_bar = px.bar(df_centro, x='ZONA', y='Total OMs', color='ZONA', text='Total OMs', color_discrete_map={'ARAUCO': '#DEB887', 'CHILLAN': '#800040', 'OTRAS': '#006580'})
-                fig_bar.update_traces(textposition='outside')
+                fig_bar.update_traces(
+                    textposition='outside',
+                    hovertemplate="<b>Zona:</b> %{x}<br><b>Total OMs:</b> %{y}<extra></extra>"
+                )
                 fig_bar.update_layout(margin=dict(t=10, b=10, l=10, r=10), showlegend=False, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_bar, use_container_width=True)
                 
             st.markdown("</div>", unsafe_allow_html=True)
+            
     else: 
         st.info("Sin datos para el resumen de OMs.")
 
@@ -645,51 +872,52 @@ with tab1:
     # --- SECCIÓN 1: RESUMEN DE AVISOS ---
     st.subheader("📋 Resumen de Avisos por Programador")
     if not av_filt.empty:
-        col_m1, col_m2, col_m3, col_m4, col_m5, col_m6 = st.columns(6)
-        col_m1.metric("TOTAL AVISOS", len(av_filt))
-        
-        # Métricas cruzadas de OMs — búsqueda exacta por campo 'Status de usuario'
-        cant_crea = len(om_filt[om_filt['Status de usuario'].str.upper().str.contains('CREA', na=False)])
-        cant_pprg = len(om_filt[om_filt['Status de usuario'].str.upper().str.contains('PPRG', na=False)])
-        cant_ppln = len(om_filt[om_filt['Status de usuario'].str.upper().str.contains('PPLN', na=False)])
-        cant_plan = len(om_filt[om_filt['Status de usuario'].str.upper().str.contains('PLAN', na=False) & ~om_filt['Status de usuario'].str.upper().str.contains('PPLN', na=False)])
-        cant_rete = len(om_filt[om_filt['Status de usuario'].str.upper().str.contains('RETE', na=False)])
-        
-        col_m2.metric("CREA", cant_crea)
-        col_m3.metric("PPRG", cant_pprg)
-        col_m4.metric("PPLN", cant_ppln)
-        col_m5.metric("PLAN", cant_plan)
-        col_m6.metric("RETE", cant_rete)
-        
-        st.markdown("<hr style='margin-top: 0.5rem; margin-bottom: 1rem;'>", unsafe_allow_html=True)
-        
         # 1. Crear Tabla
         df_grouped_av = av_filt.copy()
         
-        # Mapeo con etiquetas de negocio comprensibles (corrige status crudos SAP)
-        def agrupar_av(s):
-            s = str(s).upper()
-            if 'METR ORAS' in s: return 'OM Pend. Planificación'
-            if 'METR' in s: return 'Aprobado Sin OM'
-            if 'MEAB' in s: return 'Pendiente Aprobación'
-            if 'RECH' in s or 'MECE' in s or 'MAEN' in s: return 'Rechazados/Cerrados'
-            if 'CREA' in s: return 'Creado'
-            if 'PPRG' in s: return 'Pre-programado'
-            if 'PPLN' in s: return 'Pre-planificado'
-            if 'PLAN' in s: return 'Planificado'
-            if 'RETE' in s: return 'Retenido'
-            return 'Otros'
+        # 1. Crear Tablas Pivot (Resumen General)
+        col_res1, col_res2 = st.columns([1, 1.5])
+        
+        with col_res1:
+            st.markdown("**Distribución por Prioridad**")
+            st.caption("Cantidad de Avisos asignados a cada programador según su prioridad.")
+            tabla_prio_av = pd.crosstab(index=df_grouped_av['Programador'], columns=df_grouped_av['Prioridad'], margins=True, margins_name='TOTAL')
+            st.dataframe(tabla_prio_av.reset_index(), use_container_width=True, hide_index=True)
             
-        df_grouped_av['Status Renombrado'] = df_grouped_av['Status Filtro'].apply(agrupar_av)
-        
-        tabla_avisos_pivot = pd.crosstab(index=df_grouped_av['Programador'], columns=df_grouped_av['Status Renombrado'], margins=True, margins_name='TOTAL Avisos')
-        # Mostrar todas las columnas que existan en los datos + el total
-        cols_deseadas = ['Aprobado Sin OM', 'Pendiente Aprobación', 'OM Pend. Planificación', 'Rechazados/Cerrados', 'Creado', 'Pre-programado', 'Pre-planificado', 'Planificado', 'Retenido', 'Otros', 'TOTAL Avisos']
-        cols_presentes = [c for c in cols_deseadas if c in tabla_avisos_pivot.columns]
-        
-        tabla_avisos_pivot = tabla_avisos_pivot[cols_presentes].reset_index()
-        
-        st.dataframe(tabla_avisos_pivot, use_container_width=True, hide_index=True)
+        with col_res2:
+            st.markdown("**Distribución por Status**")
+            st.caption("Cantidad de Avisos asignados a cada programador según el estado actual.")
+            tabla_avisos_pivot = pd.crosstab(index=df_grouped_av['Programador'], columns=df_grouped_av['Status Filtro'], margins=True, margins_name='TOTAL Avisos')
+            
+            # Forzar la aparición de columnas clave aunque estén en 0
+            cols_fijas = ['CREA', 'PPRG', 'PPLN', 'PLAN', 'RETE', 'RECH', 'MAEN', 'MEAB', 'METR', 'METR ORAS', 'MECE', 'OTRO STATUS']
+            for c in cols_fijas:
+                if c not in tabla_avisos_pivot.columns:
+                    tabla_avisos_pivot[c] = 0
+                    
+            # Reordenar las columnas manteniendo 'Programador' en index y 'TOTAL Avisos' al final
+            cols_ordenadas = [c for c in cols_fijas if c in tabla_avisos_pivot.columns]
+            otras_cols = [c for c in tabla_avisos_pivot.columns if c not in cols_fijas and c != 'TOTAL Avisos']
+            tabla_avisos_pivot = tabla_avisos_pivot[cols_ordenadas + otras_cols + ['TOTAL Avisos']]
+            
+            st.dataframe(tabla_avisos_pivot.reset_index(), use_container_width=True, hide_index=True)
+            
+        # 2. Detalle Completo (Solo si hay 1 programador seleccionado)
+        if df_grouped_av['Programador'].nunique() == 1:
+            prog_name = df_grouped_av['Programador'].iloc[0]
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.info(f"Mostrando detalle completo de Avisos asignados a: **{prog_name}**")
+            
+            cols_to_show_av = ['Aviso', 'Prioridad', 'Status del sistema', 'Status Filtro', 'Status Renombrado', 'Denominación de la ubicación técnica', 'Creado el', 'Días Abierto']
+            cols_to_show_av = [c for c in cols_to_show_av if c in df_grouped_av.columns]
+            
+            df_detalle_av = df_grouped_av[cols_to_show_av].copy()
+            
+            # Formatear IDs para que Streamlit no los trate como números con comas
+            if 'Aviso' in df_detalle_av.columns:
+                df_detalle_av['Aviso'] = df_detalle_av['Aviso'].astype(str).str.replace(r'\.0$', '', regex=True)
+                
+            st.dataframe(df_detalle_av, use_container_width=True, hide_index=True)
         
         # 2. Botón Interruptor para Gráficos
         if st.toggle("📊 Mostrar gráficos de Avisos"):
@@ -700,14 +928,19 @@ with tab1:
                 st.markdown("**Avisos por Prioridad**")
                 df_prio = av_filt.groupby('Prioridad').size().reset_index(name='Cantidad')
                 fig_donut = px.pie(df_prio, values='Cantidad', names='Prioridad', hole=0.65, color_discrete_sequence=QLIK_COLORS)
-                fig_donut.update_traces(textposition='inside', textinfo='value')
+                fig_donut.update_traces(
+                    textposition='inside', textinfo='value',
+                    hovertemplate="<b>Prioridad:</b> %{label}<br><b>Cantidad:</b> %{value}<extra></extra>"
+                )
                 fig_donut.update_layout(margin=dict(t=10, b=10, l=10, r=10), showlegend=True, paper_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_donut, use_container_width=True)
                 
             with col_g2:
                 st.markdown("**Avisos por Status y Programador**")
                 df_av_bar = av_filt.groupby(['Programador', 'Status Filtro']).size().reset_index(name='Cantidad')
-                fig_bar_av = px.bar(df_av_bar, x='Programador', y='Cantidad', color='Status Filtro', color_discrete_sequence=['#A3334E', '#006580', '#E5CDA8'])
+                df_av_bar['Descripción'] = df_av_bar['Status Filtro'].apply(obtener_descripcion_status)
+                fig_bar_av = px.bar(df_av_bar, x='Programador', y='Cantidad', color='Status Filtro', hover_data={'Descripción': True}, color_discrete_sequence=['#A3334E', '#006580', '#E5CDA8'])
+                fig_bar_av.update_traces(hovertemplate="<b>Programador:</b> %{x}<br><b>Status:</b> %{data.name}<br><b>Descripción:</b> %{customdata[0]}<br><b>Cantidad:</b> %{y}<extra></extra>")
                 fig_bar_av.update_layout(margin=dict(t=10, b=10, l=10, r=10), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_bar_av, use_container_width=True)
                 
@@ -718,38 +951,39 @@ with tab1:
     st.markdown("---")
 
     # --- SECCIÓN 2: RESUMEN COMBINADO ---
-    st.subheader("💼 Resumen Combinado (Avisos y OMs con Costo Planificado)")
+    st.subheader("💼 Resumen Combinado (Cantidad de Avisos y OMs)")
     av_count = av_filt.groupby('Programador').size().reset_index(name='Cuenta de Aviso')
-    om_agg = om_filt.groupby('Programador').agg(Cuenta_de_Orden=('Orden', 'count'), Suma_Plan=('Tota general (plan)', 'sum')).reset_index()
+    om_agg = om_filt.groupby('Programador').agg(Cuenta_de_Orden=('Orden', 'count')).reset_index()
     comb_df = pd.merge(av_count, om_agg, on='Programador', how='outer').fillna(0)
     
     if not comb_df.empty:
         # 1. Crear Tabla
-        total_row = pd.DataFrame({'Programador': ['Total general'], 'Cuenta de Aviso': [comb_df['Cuenta de Aviso'].sum()], 'Cuenta_de_Orden': [comb_df['Cuenta_de_Orden'].sum()], 'Suma_Plan': [comb_df['Suma_Plan'].sum()]})
+        total_row = pd.DataFrame({'Programador': ['Total general'], 'Cuenta de Aviso': [comb_df['Cuenta de Aviso'].sum()], 'Cuenta_de_Orden': [comb_df['Cuenta_de_Orden'].sum()]})
         comb_df_disp = pd.concat([comb_df, total_row], ignore_index=True)
         
-        comb_df_disp.rename(columns={'Programador': 'Etiquetas de fila', 'Cuenta_de_Orden': 'Cuenta de Orden', 'Suma_Plan': 'Suma de Tota general (plan)'}, inplace=True)
+        comb_df_disp.rename(columns={'Programador': 'Etiquetas de fila', 'Cuenta_de_Orden': 'Cuenta de Orden'}, inplace=True)
         comb_df_disp['Cuenta de Aviso'] = comb_df_disp['Cuenta de Aviso'].astype(int)
         comb_df_disp['Cuenta de Orden'] = comb_df_disp['Cuenta de Orden'].astype(int)
-        comb_df_disp['Suma de Tota general (plan)'] = comb_df_disp['Suma de Tota general (plan)'].apply(lambda x: f"${x:,.0f}".replace(',', '.'))
         
-        st.dataframe(comb_df_disp, use_container_width=True, hide_index=True)
+        num_cols_comb = [c for c in comb_df_disp.columns if c != 'Etiquetas de fila']
+        st.dataframe(comb_df_disp.style.set_properties(subset=num_cols_comb, **{'text-align': 'center'}), use_container_width=True, hide_index=True)
         
         # 2. Botón Interruptor para Gráficos
-        if st.toggle("📊 Mostrar gráficos Combinados"):
+        if st.toggle("📊 Mostrar gráfico Combinado"):
             st.markdown("<div class='qlik-container'>", unsafe_allow_html=True)
-            col_g3, col_g4 = st.columns(2)
             
-            with col_g3:
-                st.markdown("**Costo Planificado por Programador**")
-                # Se grafica omitiendo el "Total general" para no distorsionar las barras
-                fig_cost = px.bar(comb_df, x='Programador', y='Suma_Plan', text='Suma_Plan', color_discrete_sequence=['#006580'])
-                fig_cost.update_traces(texttemplate='$%{text:,.0f}', textposition='outside')
-                fig_cost.update_layout(margin=dict(t=10, b=10, l=10, r=10), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-                st.plotly_chart(fig_cost, use_container_width=True)
-                
-            with col_g4:
-                st.empty() # Espacio disponible si se agrega otro gráfico
+            st.markdown("**Cantidad de Avisos y OMs por Programador**")
+            # Preparar datos para barras agrupadas
+            comb_melt = comb_df.melt(id_vars=['Programador'], value_vars=['Cuenta de Aviso', 'Cuenta_de_Orden'], var_name='Tipo', value_name='Cantidad')
+            comb_melt['Tipo'] = comb_melt['Tipo'].replace({'Cuenta de Aviso': 'Avisos', 'Cuenta_de_Orden': 'Órdenes (OMs)'})
+            
+            fig_comb = px.bar(comb_melt, x='Programador', y='Cantidad', color='Tipo', barmode='group', color_discrete_sequence=['#E4A11B', '#006580'])
+            fig_comb.update_traces(
+                texttemplate='%{y}', textposition='outside',
+                hovertemplate="<b>Programador:</b> %{x}<br><b>%{data.name}:</b> %{y}<extra></extra>"
+            )
+            fig_comb.update_layout(margin=dict(t=10, b=10, l=10, r=10), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', legend_title_text='')
+            st.plotly_chart(fig_comb, use_container_width=True)
                 
             st.markdown("</div>", unsafe_allow_html=True)
             
@@ -761,92 +995,181 @@ with tab1:
 # ---------------------------------------------------------------------
 with tab2:
     st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
-    col_f1, col_f2, col_f3, col_f4 = st.columns([1, 1, 1, 1])
-    t_plan = om_filt['Tota general (plan)'].sum()
-    t_real = om_filt['Costes tot.reales'].sum()
-    d_clp = t_plan - t_real  # Positivo = ahorro vs plan; Negativo = sobrecosto
-    col_f1.metric("COSTO PLANIFICADO", f"${t_plan:,.0f}".replace(',', '.'))
-    col_f2.metric("COSTO REAL", f"${t_real:,.0f}".replace(',', '.'))
-    col_f3.metric("DESVIACIÓN (CLP)", f"${d_clp:,.0f}".replace(',', '.'))
-    st.markdown("<hr style='margin-top: 25px; margin-bottom: 25px; border-top: 1px solid #E2E8F0;'>", unsafe_allow_html=True)
     
-    col_t2a, col_t2b = st.columns(2)
+    # ---------------------------------------------------------------------
+    # 1. TOP KPIs DETALLADOS (AVISOS, OMS Y PROGRAMADOR)
+    # ---------------------------------------------------------------------
+    # AVISOS
+    tot_av = len(av_filt)
+    av_crea = len(av_filt[av_filt['Status Filtro'].astype(str).str.contains('CREA', case=False, na=False)]) if not av_filt.empty and 'Status Filtro' in av_filt.columns else 0
+    av_ppln = len(av_filt[av_filt['Status Filtro'].astype(str).str.contains('PPLN', case=False, na=False)]) if not av_filt.empty and 'Status Filtro' in av_filt.columns else 0
+    av_plan = len(av_filt[av_filt['Status Filtro'].astype(str).str.contains('PLAN', case=False, na=False)]) if not av_filt.empty and 'Status Filtro' in av_filt.columns else 0
+    av_rete = len(av_filt[av_filt['Status Filtro'].astype(str).str.contains('RETE', case=False, na=False)]) if not av_filt.empty and 'Status Filtro' in av_filt.columns else 0
     
-    with col_t2a:
-        st.subheader("Desglose de Avisos")
-        if not av_filt.empty:
-            tabla_avisos = av_filt.groupby(['Status Filtro', 'Prioridad']).size().reset_index(name='Cantidad')
-            st.dataframe(tabla_avisos, use_container_width=True, hide_index=True)
-            
-            fig_av = px.bar(tabla_avisos, x='Status Filtro', y='Cantidad', color='Prioridad', barmode='group', text='Cantidad', color_discrete_sequence=QLIK_COLORS)
-            fig_av.update_traces(textposition='outside', hovertemplate="<b>Status:</b> %{x}<br><b>Cantidad:</b> %{y}<extra></extra>")
-            fig_av.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-            st.plotly_chart(fig_av, use_container_width=True)
-        else: st.info("No hay Avisos para mostrar.")
-            
-    with col_t2b:
-        st.subheader("Desglose de OMs y Costos")
-        if not om_filt.empty:
-            tabla_oms = om_filt.groupby(['Status de usuario', 'Prioridad']).agg(Cantidad=('Orden', 'count'), Costo_Plan=('Tota general (plan)', 'sum'), Costo_Real=('Costes tot.reales', 'sum')).reset_index()
-            st.dataframe(tabla_oms.style.format({'Costo_Plan': '${:,.0f}', 'Costo_Real': '${:,.0f}'}), use_container_width=True, hide_index=True)
-            
-            # Gráfico comparativo Plan vs Real por Prioridad (corrige: antes solo mostraba Plan)
-            tabla_oms_melt = tabla_oms.groupby('Prioridad').agg(Costo_Plan=('Costo_Plan','sum'), Costo_Real=('Costo_Real','sum')).reset_index()
-            tabla_oms_melt = tabla_oms_melt.melt(id_vars='Prioridad', value_vars=['Costo_Plan', 'Costo_Real'], var_name='Tipo', value_name='Monto')
-            tabla_oms_melt['Tipo'] = tabla_oms_melt['Tipo'].map({'Costo_Plan': 'Planificado', 'Costo_Real': 'Real'})
-            fig_om = px.bar(tabla_oms_melt, x='Prioridad', y='Monto', color='Tipo', barmode='group',
-                            title='Costo Planificado vs Real por Prioridad',
-                            color_discrete_map={'Planificado': '#006580', 'Real': '#A3334E'},
-                            text='Monto')
-            fig_om.update_traces(texttemplate='$%{text:,.0f}', textposition='outside')
-            fig_om.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-            st.plotly_chart(fig_om, use_container_width=True)
-        else: st.info("No hay OMs para mostrar.")
+    # OMS
+    tot_om = len(om_filt)
+    om_abie = len(om_filt[om_filt['Status de usuario'].astype(str).str.contains('ABIE', case=False, na=False)]) if not om_filt.empty and 'Status de usuario' in om_filt.columns else 0
+    om_lib = len(om_filt[om_filt['Status de usuario'].astype(str).str.contains('LIB', case=False, na=False)]) if not om_filt.empty and 'Status de usuario' in om_filt.columns else 0
+    om_esrv = len(om_filt[om_filt['Status de usuario'].astype(str).str.contains('ESRV', case=False, na=False)]) if not om_filt.empty and 'Status de usuario' in om_filt.columns else 0
+    om_emat = len(om_filt[om_filt['Status de usuario'].astype(str).str.contains('EMAT', case=False, na=False)]) if not om_filt.empty and 'Status de usuario' in om_filt.columns else 0
 
-# ---------------------------------------------------------------------
-# TAB 3: LÍNEA DE TIEMPO
-# ---------------------------------------------------------------------
-with tab3:
-    st.subheader("Evolución de Solicitudes (Mensual/Anual)")
-    st.caption("📅 Los datos se agrupan por la **fecha de creación** del aviso (campo 'Creado el' del IW28).")
-    av_time = av_filt.dropna(subset=['Creado el']).copy()
-    if not av_time.empty:
-        av_time['Año'] = av_time['Creado el'].dt.year.astype(str)
-        av_time['Mes_Num'] = av_time['Creado el'].dt.month
-        meses_es = {1: 'ene', 2: 'feb', 3: 'mar', 4: 'abr', 5: 'may', 6: 'jun', 7: 'jul', 8: 'ago', 9: 'sept', 10: 'oct', 11: 'nov', 12: 'dic'}
-        av_time['Mes'] = av_time['Mes_Num'].map(meses_es)
+    # PROGRAMADOR ESTRELLA (Global - No afectado por el filtro de programador individual)
+    if not oms_df.empty and 'Programador' in oms_df.columns:
+        prog_counts = oms_df['Programador'].value_counts()
+        top_prog = prog_counts.idxmax() if not prog_counts.empty else "N/A"
+        top_prog_oms = prog_counts.max() if not prog_counts.empty else 0
         
-        df_t = av_time.groupby(['Status Filtro', 'Año', 'Mes_Num', 'Mes']).size().reset_index(name='Cantidad').sort_values(by=['Año', 'Mes_Num'])
-        orden_meses = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic"]
-        titulos = {
-            'MEAB':      'PENDIENTE APROBACIÓN (MEAB)',
-            'METR':      'APROBADOS PENDIENTES OM (METR)',
-            'METR ORAS': 'OM PENDIENTE PLANIFICACIÓN (METR ORAS)',
-            'CREA':      'CREADOS (CREA)',
-            'PPRG':      'PRE-PROGRAMADOS (PPRG)',
-            'PPLN':      'PRE-PLANIFICADOS (PPLN)',
-            'PLAN':      'PLANIFICADOS (PLAN)',
-            'RETE':      'RETENIDOS (RETE)',
-            'RECH':      'RECHAZADOS (RECH)',
-        }
-        # Selector de status a graficar (por defecto los 3 principales)
-        status_disponibles = [s for s in titulos.keys() if s in df_t['Status Filtro'].unique()]
-        status_sel_time = st.multiselect(
-            "Status a visualizar:",
-            options=status_disponibles,
-            default=[s for s in ['MEAB', 'METR', 'METR ORAS'] if s in status_disponibles],
-            key="time_status_sel"
-        )
+        if top_prog != "N/A":
+            df_top = oms_df[oms_df['Programador'] == top_prog]
+            top_prog_costo = df_top['Costes tot.reales'].sum() if 'Costes tot.reales' in df_top.columns else 0
+            top_prog_lib = len(df_top[df_top['Status de usuario'].astype(str).str.contains('LIB', case=False, na=False)]) if 'Status de usuario' in df_top.columns else 0
+            top_prog_abie = len(df_top[df_top['Status de usuario'].astype(str).str.contains('ABIE', case=False, na=False)]) if 'Status de usuario' in df_top.columns else 0
+        else:
+            top_prog_costo = 0
+            top_prog_lib = 0
+            top_prog_abie = 0
+    else:
+        top_prog = "N/A"
+        top_prog_oms = 0
+        top_prog_costo = 0
+        top_prog_lib = 0
+        top_prog_abie = 0
         
-        for st_val in status_sel_time:
-            df_plot = df_t[df_t['Status Filtro'] == st_val]
-            if not df_plot.empty:
-                st.markdown(f"**{titulos.get(st_val, st_val)}**")
-                fig_time = px.bar(df_plot, x='Mes', y='Cantidad', color='Año', barmode='group', text='Cantidad', category_orders={"Mes": orden_meses}, color_discrete_sequence=['#006580', '#A3334E', '#E5CDA8'])
-                fig_time.update_traces(textposition='outside')
-                fig_time.update_layout(xaxis_title="", yaxis_title="", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', height=300)
-                st.plotly_chart(fig_time, use_container_width=True)
-    else: st.info("No hay fechas válidas para graficar en esta selección.")
+    st.markdown(f"""
+    <div style="display: flex; gap: 20px; justify-content: space-between; margin-bottom: 30px;">
+        <div class="kpi-card-hover" style="flex: 1; background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%); border-left: 5px solid #006580; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); transition: transform 0.2s;">
+            <p style="margin: 0; font-size: 0.9rem; color: #64748b; font-weight: 600; text-transform: uppercase;">📋 Avisos Activos</p>
+            <h2 style="margin: 10px 0 15px 0; font-size: 2.2rem; color: #0f172a;">{tot_av:,}</h2>
+            <div style="display: flex; justify-content: space-between; font-size: 0.9rem; color: #334155; border-top: 1px solid #E2E8F0; padding-top: 10px;">
+                <div style="text-align: center;"><strong>CREA</strong><br><span style="color: #64748b;">{av_crea:,}</span></div>
+                <div style="text-align: center;"><strong>PPLN</strong><br><span style="color: #64748b;">{av_ppln:,}</span></div>
+                <div style="text-align: center;"><strong>PLAN</strong><br><span style="color: #64748b;">{av_plan:,}</span></div>
+                <div style="text-align: center;"><strong>RETE</strong><br><span style="color: #64748b;">{av_rete:,}</span></div>
+            </div>
+        </div>
+        <div class="kpi-card-hover" style="flex: 1; background: linear-gradient(135deg, #ffffff 0%, #fef2f2 100%); border-left: 5px solid #A3334E; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); transition: transform 0.2s;">
+            <p style="margin: 0; font-size: 0.9rem; color: #64748b; font-weight: 600; text-transform: uppercase;">🛠️ Órdenes (OMs) Activas</p>
+            <h2 style="margin: 10px 0 15px 0; font-size: 2.2rem; color: #A3334E;">{tot_om:,}</h2>
+            <div style="display: flex; justify-content: space-between; font-size: 0.9rem; color: #334155; border-top: 1px solid #E2E8F0; padding-top: 10px;">
+                <div style="text-align: center;"><strong>ABIE</strong><br><span style="color: #64748b;">{om_abie:,}</span></div>
+                <div style="text-align: center;"><strong>LIB</strong><br><span style="color: #64748b;">{om_lib:,}</span></div>
+                <div style="text-align: center;"><strong>ESRV</strong><br><span style="color: #64748b;">{om_esrv:,}</span></div>
+                <div style="text-align: center;"><strong>EMAT</strong><br><span style="color: #64748b;">{om_emat:,}</span></div>
+            </div>
+        </div>
+        <div class="kpi-card-hover" style="flex: 1; background: linear-gradient(135deg, #ffffff 0%, #f0fdf4 100%); border-left: 5px solid #7AB3A2; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); transition: transform 0.2s;">
+            <p style="margin: 0; font-size: 0.9rem; color: #64748b; font-weight: 600; text-transform: uppercase;">🏆 Top Programador</p>
+            <h2 style="margin: 10px 0 5px 0; font-size: 1.6rem; color: #0f172a;">{top_prog}</h2>
+            <div style="display: flex; gap: 15px; margin-bottom: 5px;">
+                <div><span style="font-size: 1.1rem; font-weight: 700; color: #0f172a;">{top_prog_oms:,}</span> <span style="font-size: 0.8rem; color: #64748b;">OMs</span></div>
+                <div><span style="font-size: 1.1rem; font-weight: 700; color: #0f172a;">${top_prog_costo:,.0f}</span> <span style="font-size: 0.8rem; color: #64748b;">Costo</span></div>
+            </div>
+            <div style="display: flex; justify-content: space-around; font-size: 0.9rem; color: #334155; border-top: 1px solid #E2E8F0; padding-top: 10px;">
+                <div style="text-align: center;"><strong>ABIE</strong><br><span style="color: #64748b;">{top_prog_abie:,}</span></div>
+                <div style="text-align: center;"><strong>LIB</strong><br><span style="color: #64748b;">{top_prog_lib:,}</span></div>
+            </div>
+        </div>
+    </div>
+    <style>
+        .kpi-card-hover:hover {{
+            transform: translateY(-5px);
+            box-shadow: 0 10px 15px rgba(0,0,0,0.1) !important;
+        }}
+    </style>
+    """.replace(',', '.'), unsafe_allow_html=True)
+
+    # ---------------------------------------------------------------------
+    # 2. GRÁFICOS GERENCIALES (SIDE-BY-SIDE)
+    # ---------------------------------------------------------------------
+    if st.toggle("📊 Mostrar gráficos de Avisos", value=True, key="toggle_graf_tab2"):
+        col_chart1, col_chart2 = st.columns(2)
+        
+        with col_chart1:
+            st.markdown("<h4 style='text-align: center; color: #334155; margin-bottom: 0px;'>Distribución de Avisos por Status</h4>", unsafe_allow_html=True)
+            if not av_filt.empty:
+                df_av_status = av_filt['Status Filtro'].value_counts().reset_index()
+                df_av_status.columns = ['Status Filtro', 'Cantidad']
+                if not df_av_status.empty:
+                    df_av_status['Descripción'] = df_av_status['Status Filtro'].apply(obtener_descripcion_status)
+                    
+                    fig_donut = px.pie(
+                        df_av_status, values='Cantidad', names='Status Filtro', 
+                        hole=0.55, custom_data=['Descripción'], color_discrete_sequence=QLIK_COLORS
+                    )
+                    fig_donut.update_traces(
+                        textposition='outside', textinfo='percent+label',
+                        hovertemplate="<b>%{label}</b><br>Desc: %{customdata[0]}<br>Cantidad: %{value}<extra></extra>"
+                    )
+                    fig_donut.update_layout(showlegend=False, margin=dict(t=20, b=20, l=20, r=20), height=350, paper_bgcolor='rgba(0,0,0,0)')
+                    # Anotación en el centro
+                    fig_donut.add_annotation(text=f"<b>{len(av_filt)}</b><br>Avisos", x=0.5, y=0.5, font_size=20, showarrow=False)
+                    st.plotly_chart(fig_donut, use_container_width=True)
+                else:
+                    st.info("No hay desglose de status para graficar.")
+            else:
+                st.info("Sin datos de Avisos.")
+
+        with col_chart2:
+            st.markdown("<h4 style='text-align: center; color: #334155; margin-bottom: 0px;'>Distribución de OMs por Prioridad</h4>", unsafe_allow_html=True)
+            if not om_filt.empty:
+                df_om_prio = om_filt.groupby(['Prioridad', 'Status de usuario']).size().reset_index(name='Cantidad')
+                if not df_om_prio.empty:
+                    fig_bar_om = px.bar(
+                        df_om_prio, x='Prioridad', y='Cantidad', color='Status de usuario',
+                        barmode='stack', text='Cantidad', color_discrete_sequence=QLIK_COLORS
+                    )
+                    fig_bar_om.update_traces(textposition='inside', hovertemplate="<b>Prioridad:</b> %{x}<br><b>Status:</b> %{data.name}<br><b>Total:</b> %{y}<extra></extra>")
+                    fig_bar_om.update_layout(margin=dict(t=20, b=20, l=10, r=10), height=350, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                    st.plotly_chart(fig_bar_om, use_container_width=True)
+                else:
+                    st.info("No hay desglose de prioridades para graficar.")
+            else:
+                st.info("Sin datos de OMs.")
+
+    st.markdown("<hr style='margin-top: 10px; margin-bottom: 30px; border-top: 1px solid #E2E8F0;'>", unsafe_allow_html=True)
+
+    # ---------------------------------------------------------------------
+    # 3. TABLAS DE RESUMEN (PIVOT TABLES)
+    # ---------------------------------------------------------------------
+    st.markdown("<h4 style='text-align: center; color: #334155; margin-top: 20px; margin-bottom: 20px;'>Resumen Estructurado de Datos</h4>", unsafe_allow_html=True)
+    
+    col_res_av, col_res_om = st.columns(2)
+
+    with col_res_av:
+        st.markdown("**📋 Resumen de Avisos (Cantidades)**")
+        if not av_filt.empty:
+            # Tabla dinámica: Status Filtro vs Prioridad
+            try:
+                resumen_av = pd.crosstab(
+                    av_filt['Status Filtro'].apply(obtener_descripcion_status), 
+                    av_filt['Prioridad'],
+                    margins=True, margins_name="Total General"
+                )
+                st.dataframe(resumen_av, use_container_width=True)
+            except Exception as e:
+                # Fallback simple
+                df_av_sum = av_filt.groupby(['Prioridad', 'Status Filtro']).size().reset_index(name='Cantidad Avisos')
+                st.dataframe(df_av_sum, use_container_width=True, hide_index=True)
+        else:
+            st.write("No hay Avisos para resumir.")
+
+    with col_res_om:
+        st.markdown("**🛠️ Resumen de OMs (Cantidades y Costos)**")
+        if not om_filt.empty:
+            # Agrupación por Prioridad y Status
+            df_om_sum = om_filt.groupby(['Prioridad', 'Status de usuario']).agg(
+                Cantidad_OMs=('Orden', 'count'),
+                Costo_Planificado=('Tota general (plan)', 'sum'),
+                Costo_Real=('Costes tot.reales', 'sum')
+            ).reset_index()
+            
+            # Formatear números a moneda
+            df_om_sum['Costo_Planificado'] = df_om_sum['Costo_Planificado'].apply(lambda x: f"${x:,.0f}".replace(',', '.'))
+            df_om_sum['Costo_Real'] = df_om_sum['Costo_Real'].apply(lambda x: f"${x:,.0f}".replace(',', '.'))
+            
+            st.dataframe(df_om_sum, use_container_width=True, hide_index=True)
+        else:
+            st.write("No hay OMs para resumir.")
 
 # ---------------------------------------------------------------------
 # TAB 4: EFICIENCIA Y COSTOS POR PROGRAMADOR
@@ -861,10 +1184,18 @@ with tab4:
     if not om_filt.empty and 'Fecha Creacion OM' in om_filt.columns:
         df_carga = om_filt.dropna(subset=['Fecha Creacion OM']).copy()
         df_carga['Fecha'] = df_carga['Fecha Creacion OM'].dt.date
+        df_carga['Semana_Num'] = df_carga['Fecha Creacion OM'].dt.isocalendar().week
+        df_carga['Semana'] = "Semana " + df_carga['Semana_Num'].astype(str)
 
         fechas_validas = df_carga['Fecha'].dropna()
         if not fechas_validas.empty:
             f_min, f_max = fechas_validas.min(), fechas_validas.max()
+            
+            # Safeguard against NaT
+            if pd.isna(f_min) or pd.isna(f_max):
+                import datetime
+                f_min = f_max = datetime.date.today()
+                
             col_d1, col_d2, col_d3 = st.columns([2, 2, 6])
             with col_d1:
                 fecha_inicio = st.date_input("📅 Desde", value=f_min, min_value=f_min, max_value=f_max, key="carga_desde")
@@ -872,90 +1203,42 @@ with tab4:
                 fecha_fin = st.date_input("📅 Hasta", value=f_max, min_value=f_min, max_value=f_max, key="carga_hasta")
             df_carga = df_carga[(df_carga['Fecha'] >= fecha_inicio) & (df_carga['Fecha'] <= fecha_fin)]
 
-        # Tabla resumen: total OMs, días activos, promedio diario
+        # Tabla resumen limpia: solo total OMs
         df_resumen_carga = df_carga.groupby('Programador').agg(
-            Total_OMs=('Orden', 'count'),
-            Dias_Activos=('Fecha', 'nunique'),
+            Total_OMs=('Orden', 'count')
         ).reset_index()
-        df_resumen_carga['Promedio_OMs_por_Dia'] = (
-            df_resumen_carga['Total_OMs'] / df_resumen_carga['Dias_Activos']
-        ).round(1)
-        df_resumen_carga.rename(columns={
-            'Total_OMs': 'Total OMs',
-            'Dias_Activos': 'Días con Actividad',
-            'Promedio_OMs_por_Dia': 'Promedio OMs/Día'
-        }, inplace=True)
+        df_resumen_carga.rename(columns={'Total_OMs': 'Total OMs'}, inplace=True)
+        
         # Fila de total
         total_carga = pd.DataFrame({
             'Programador': ['Total general'],
-            'Total OMs': [int(df_resumen_carga['Total OMs'].sum())],
-            'Días con Actividad': ['-'],
-            'Promedio OMs/Día': ['-']
+            'Total OMs': [int(df_resumen_carga['Total OMs'].sum())]
         })
         st.dataframe(
             pd.concat([df_resumen_carga, total_carga], ignore_index=True),
             use_container_width=True, hide_index=True
         )
 
-        # Toggle + selector de tipo de gráfico
-        if st.toggle("📊 Mostrar Gráfico de Carga de Trabajo"):
-            tipo_graf = st.radio(
-                "Tipo de gráfico:",
-                ["📊 Barras por Día", "📅 Barras por Semana", "📈 Línea de Tendencia", "🗓️ Heatmap"],
-                horizontal=True,
-                key="tipo_grafico_carga"
-            )
+        # Gráfico único de barras por semana
+        df_agg_sem = df_carga.groupby(['Semana_Num', 'Semana', 'Programador']).size().reset_index(name='OMs Creadas')
+        df_agg_sem = df_agg_sem.sort_values('Semana_Num')
+        colores_prog = ['#006580', '#A3334E', '#E5CDA8', '#7AB3A2', '#4C2C69']
 
-            df_agg_dia = df_carga.groupby(['Fecha', 'Programador']).size().reset_index(name='OMs Creadas')
-            df_agg_dia['Fecha'] = pd.to_datetime(df_agg_dia['Fecha'])
-            colores_prog = ['#006580', '#A3334E', '#E5CDA8', '#7AB3A2', '#4C2C69']
-
-            if tipo_graf == "📊 Barras por Día":
-                fig_carga = px.bar(
-                    df_agg_dia, x='Fecha', y='OMs Creadas', color='Programador',
-                    barmode='group', text='OMs Creadas',
-                    color_discrete_sequence=colores_prog,
-                    labels={'Fecha': 'Fecha de Creación', 'OMs Creadas': 'Nº OMs'}
-                )
-                fig_carga.update_traces(textposition='outside')
-                fig_carga.update_xaxes(tickformat='%d-%m-%Y', tickangle=45)
-
-            elif tipo_graf == "📅 Barras por Semana":
-                df_agg_dia['Semana'] = df_agg_dia['Fecha'].dt.to_period('W').astype(str)
-                df_sem = df_agg_dia.groupby(['Semana', 'Programador'])['OMs Creadas'].sum().reset_index()
-                fig_carga = px.bar(
-                    df_sem, x='Semana', y='OMs Creadas', color='Programador',
-                    barmode='group', text='OMs Creadas',
-                    color_discrete_sequence=colores_prog,
-                    labels={'Semana': 'Semana', 'OMs Creadas': 'Nº OMs'}
-                )
-                fig_carga.update_traces(textposition='outside')
-                fig_carga.update_xaxes(tickangle=45)
-
-            elif tipo_graf == "📈 Línea de Tendencia":
-                fig_carga = px.line(
-                    df_agg_dia, x='Fecha', y='OMs Creadas', color='Programador',
-                    markers=True,
-                    color_discrete_sequence=colores_prog,
-                    labels={'Fecha': 'Fecha de Creación', 'OMs Creadas': 'Nº OMs'}
-                )
-                fig_carga.update_xaxes(tickformat='%d-%m-%Y', tickangle=45)
-
-            elif tipo_graf == "🗓️ Heatmap":
-                fig_carga = px.density_heatmap(
-                    df_agg_dia, x='Fecha', y='Programador', z='OMs Creadas',
-                    color_continuous_scale='Blues',
-                    labels={'Fecha': 'Fecha', 'Programador': 'Programador', 'OMs Creadas': 'OMs'}
-                )
-                fig_carga.update_xaxes(tickformat='%d-%m-%Y', tickangle=45)
-
-            fig_carga.update_layout(
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
-                height=420,
-                margin=dict(t=30, b=10, l=10, r=10)
-            )
-            st.plotly_chart(fig_carga, use_container_width=True)
+        fig_carga = px.bar(
+            df_agg_sem, x='Semana', y='OMs Creadas', color='Programador',
+            barmode='group', text='OMs Creadas',
+            color_discrete_sequence=colores_prog,
+            labels={'Semana': 'Semana del Año', 'OMs Creadas': 'Nº OMs'}
+        )
+        fig_carga.update_traces(textposition='outside', hovertemplate="<b>%{x}</b><br><b>Programador:</b> %{data.name}<br><b>Cantidad:</b> %{y}<extra></extra>")
+        fig_carga.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            height=420,
+            margin=dict(t=30, b=10, l=10, r=10),
+            xaxis_title=None
+        )
+        st.plotly_chart(fig_carga, use_container_width=True)
     else:
         st.info("No hay datos de carga de trabajo disponibles para el período seleccionado.")
 
@@ -981,6 +1264,7 @@ with tab4:
             labels={'value': 'Monto (CLP)', 'variable': 'Tipo de Costo'},
             color_discrete_sequence=['#006580', '#A3334E']
         )
+        fig_costos.update_traces(hovertemplate="<b>Programador:</b> %{x}<br><b>%{data.name}:</b> $%{y:,.0f}<extra></extra>")
         fig_costos.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_costos, use_container_width=True)
         
@@ -991,7 +1275,8 @@ with tab4:
         for col in ['Planificado', 'Real', 'Desviacion_CLP']:
             df_eficiencia_disp[col] = df_eficiencia_disp[col].apply(lambda x: f"${x:,.0f}".replace(',', '.'))
             
-        st.dataframe(df_eficiencia_disp, use_container_width=True, hide_index=True)
+        num_cols_efi = [c for c in df_eficiencia_disp.columns if c != 'Programador']
+        st.dataframe(df_eficiencia_disp.style.set_properties(subset=num_cols_efi, **{'text-align': 'center'}), use_container_width=True, hide_index=True)
     else: 
         st.info("No hay datos de costos suficientes para el análisis.")
 
@@ -999,6 +1284,30 @@ with tab4:
 # TAB 5: EXPLORADOR DE DATOS CRUDOS
 # ---------------------------------------------------------------------
 with tab5:
+    st.subheader("⚠️ Auditoría de Asignaciones (Otro / Sin Asignar)")
+    st.write("Esta sección muestra los registros que no cumplieron las reglas (Grupo de Planificación, Centro, o Ubicación Técnica) y cayeron en 'Otro / Sin Asignar'.")
+    
+    col_aud_1, col_aud_2 = st.columns(2)
+    with col_aud_1:
+        st.markdown("**Avisos sin Asignar**")
+        av_sin_asignar = avisos_df[avisos_df['Programador'] == 'Otro / Sin Asignar']
+        if not av_sin_asignar.empty:
+            cols_show_av = [c for c in ['Aviso', 'Centro emplazamiento', 'Grupo planificación', 'Denominación de la ubicación técnica'] if c in av_sin_asignar.columns]
+            st.dataframe(av_sin_asignar[cols_show_av], use_container_width=True, hide_index=True)
+        else:
+            st.success("¡Todos los avisos tienen un programador!")
+            
+    with col_aud_2:
+        st.markdown("**OMs sin Asignar**")
+        om_sin_asignar = oms_df[oms_df['Programador'] == 'Otro / Sin Asignar']
+        if not om_sin_asignar.empty:
+            cols_show_om = [c for c in ['Orden', 'Centro emplazamiento', 'Grupo planificación', 'Denominación de la ubicación técnica'] if c in om_sin_asignar.columns]
+            st.dataframe(om_sin_asignar[cols_show_om], use_container_width=True, hide_index=True)
+        else:
+            st.success("¡Todas las OMs tienen un programador!")
+            
+    st.markdown("---")
+    
     st.subheader("Matriz Interactiva (Avisos)")
     if not av_filt.empty:
         st.dataframe(av_filt[['Aviso', 'ZONA', 'Programador', 'Status Filtro', 'Prioridad', 'Denominación de la ubicación técnica', 'Creado el', 'Días Abierto']], use_container_width=True, hide_index=True)
